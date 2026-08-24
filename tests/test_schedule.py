@@ -1,7 +1,7 @@
 from datetime import datetime
 import unittest
 
-from manmanzhuanqian import DEFAULT_CONFIG, get_snapshot, normalise_sessions, parse_clock
+from manmanzhuanqian import config_from_form, DEFAULT_CONFIG, format_gold_weight, format_percent, get_snapshot, normalise_sessions, parse_clock
 
 
 class ScheduleTests(unittest.TestCase):
@@ -56,6 +56,17 @@ class ScheduleTests(unittest.TestCase):
             {"start": "09:00", "end": "12:00"},
         ])
         self.assertEqual(result[0]["start"], "09:00")
+
+    def test_display_units_are_clear_and_unpadded(self) -> None:
+        self.assertEqual(format_percent(0.608), "60.8%")
+        self.assertEqual(format_gold_weight(417.2), "1.49g")
+
+    def test_saved_form_values_immediately_change_the_calculation(self) -> None:
+        before = get_snapshot(datetime(2026, 8, 24, 10, 0), self.config)
+        updated = config_from_form(self.config, "43500", "21.75", "09:00 - 12:00", "13:00 - 18:00", "1、2、3、4、5")
+        after = get_snapshot(datetime(2026, 8, 24, 10, 0), updated)
+        self.assertEqual(updated["monthly_salary"], 43500)
+        self.assertGreater(after.earned, before.earned)
 
 
 if __name__ == "__main__":
