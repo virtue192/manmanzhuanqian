@@ -1,0 +1,21 @@
+# Local application data and personal settings
+settings.json
+*.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Packaging
+build/
+dist/
+*.spec
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
