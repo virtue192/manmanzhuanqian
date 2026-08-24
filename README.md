@@ -47,10 +47,10 @@ python manmanzhuanqian.py
 
 ```powershell
 python -m pip install -r requirements-dev.txt
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name 慢慢赚钱 manmanzhuanqian.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name manmanzhuanqian manmanzhuanqian.py
 ```
 
-生成的程序位于 `dist\慢慢赚钱.exe`。仓库已包含 GitHub Actions：推送 `v*` 标签后会自动构建可下载的 Windows 文件。
+生成的程序位于 `dist\manmanzhuanqian.exe`（应用内仍显示“慢慢赚钱”）。仓库已包含 GitHub Actions：推送 `v*` 标签后会自动构建可下载的 Windows 文件。
 
 ## 为 GitHub 发布准备
 

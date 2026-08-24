@@ -33,9 +33,9 @@ jobs:
       - name: Install packager
         run: python -m pip install -r requirements-dev.txt
       - name: Build Windows app
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name 慢慢赚钱 manmanzhuanqian.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name manmanzhuanqian manmanzhuanqian.py
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/慢慢赚钱.exe
+          files: dist/manmanzhuanqian.exe
