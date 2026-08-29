@@ -26,10 +26,25 @@ from urllib.parse import urlencode, urlparse
 
 
 APP_NAME = "慢慢赚钱"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 WINDOW_WIDTH = 380
 WINDOW_HEIGHT = 280
 TRANSPARENT_COLOR = "#00ff01"
+# The overlay remains transparent, while dialogs use a small, quiet cold-tone
+# palette so the editable state is easy to distinguish from the desktop view.
+DIALOG_BG = "#0B1B2A"
+SURFACE = "#112A3D"
+SURFACE_HOVER = "#183B52"
+BORDER = "#2B536A"
+TEXT_PRIMARY = "#EAF7FA"
+TEXT_SECONDARY = "#A6C2CE"
+TEXT_MUTED = "#7695A6"
+ACCENT = "#6BD6E6"
+ACCENT_HOVER = "#9BEAF2"
+GOLD = "#D9BA78"
+ERROR = "#FFB6A7"
+DANGER = "#4A2A38"
+DANGER_HOVER = "#683947"
 # A deliberately fixed pre-surge reference. It is not fetched from the web.
 HISTORICAL_GOLD_PRICE_PER_GRAM = 280.0
 AI_REQUEST_TIMEOUT_SECONDS = 25
@@ -84,9 +99,9 @@ DEFAULT_FOCUS_STATE: dict[str, Any] = {
 }
 
 FOCUS_REFLECTIONS = {
-    "advance": "推进了一件事",
-    "sustain": "维持住了节奏",
-    "restore": "好好休息了",
+    "advance": "推进了事情",
+    "sustain": "保持了节奏",
+    "restore": "休息得不错",
 }
 
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -980,9 +995,12 @@ class SlowEarnApp:
         self.canvas = tk.Canvas(self.root, width=WINDOW_WIDTH, height=WINDOW_HEIGHT, bg=canvas_background, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.drag_origin: tuple[int, int] | None = None
+        self.hover_target: str | None = None
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Leave>", self.on_leave)
         self.root.bind_all("<Control-comma>", lambda _event: self.open_settings())
         self.root.bind_all("<Escape>", lambda _event: self.close())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -1000,19 +1018,72 @@ class SlowEarnApp:
         ]
         return self.canvas.create_polygon(points, smooth=True, splinesteps=18, **kwargs)
 
+    def create_dialog(self, title: str, width: int, height: int) -> tk.Toplevel:
+        """Create a readable, centered editing surface above the compact overlay."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.configure(bg=DIALOG_BG)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        desired_x = self.root.winfo_x() + (WINDOW_WIDTH - width) // 2
+        desired_y = self.root.winfo_y() + (WINDOW_HEIGHT - height) // 2
+        x = max(24, min(desired_x, screen_width - width - 24))
+        y = max(24, min(desired_y, screen_height - height - 24))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        return dialog
+
+    def dialog_button(self, parent: tk.Misc, text: str, command: Any, kind: str = "secondary", **kwargs: Any) -> tk.Button:
+        """Use one restrained button system for default, hover and pressed states."""
+        palettes = {
+            "primary": (ACCENT, "#08212E", ACCENT_HOVER, "#B8F2F7"),
+            "secondary": (SURFACE, "#D4ECF2", SURFACE_HOVER, "#0F2637"),
+            "quiet": (DIALOG_BG, TEXT_SECONDARY, "#112C3F", "#0E2232"),
+            "danger": (DANGER, "#FFD7D9", DANGER_HOVER, "#38202B"),
+        }
+        background, foreground, hover_background, active_background = palettes[kind]
+        font = kwargs.pop("font", ("Microsoft YaHei UI", 9, "bold"))
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=background,
+            fg=foreground,
+            activebackground=active_background,
+            activeforeground=foreground,
+            disabledforeground="#6D8594",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+            font=font,
+            **kwargs,
+        )
+
+        def set_hover(enabled: bool) -> None:
+            if str(button.cget("state")) == "normal":
+                button.configure(bg=hover_background if enabled else background)
+
+        button.bind("<Enter>", lambda _event: set_hover(True))
+        button.bind("<Leave>", lambda _event: set_hover(False))
+        return button
+
     def draw_arc(self, progress: float) -> None:
-        box = (70, 35, 310, 275)
-        self.canvas.create_arc(*box, start=222, extent=276, style="arc", outline="#294F6C", width=6)
+        box = (76, 42, 304, 270)
+        self.canvas.create_arc(*box, start=222, extent=276, style="arc", outline="#294A60", width=5)
         segments = round(progress * 88)
         for part in range(segments):
-            color = blend("#36B9E4", "#C6F4FF", part / max(1, 87))
-            self.canvas.create_arc(*box, start=222 - part * (276 / 88), extent=-(276 / 88 + 0.55), style="arc", outline=color, width=6)
+            color = blend("#48BED6", "#C8F0F4", part / max(1, 87))
+            self.canvas.create_arc(*box, start=222 - part * (276 / 88), extent=-(276 / 88 + 0.55), style="arc", outline=color, width=5)
 
         if progress > 0:
             angle = math.radians(222 - 276 * progress)
-            x = 190 + 120 * math.cos(angle)
-            y = 155 - 120 * math.sin(angle)
-            self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="#E8FBFF", outline="")
+            x = 190 + 114 * math.cos(angle)
+            y = 156 - 114 * math.sin(angle)
+            self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#E8FBFF", outline="")
 
     def draw_sky(self, now: datetime) -> None:
         """Draw restrained sky cues behind the value arc, never a full wallpaper."""
@@ -1053,66 +1124,67 @@ class SlowEarnApp:
 
         # The base is color-key transparent: only compact working information is drawn.
         self.draw_sky(now)
-        self.canvas.create_oval(17, 12, 34, 29, fill="#D8B75A", outline="")
-        self.canvas.create_text(25, 20, text="Au", fill="#19283C", font=("Segoe UI", 7, "bold"))
-        self.canvas.create_text(43, 20, anchor="w", text="慢慢赚钱", fill="#D8F6FF", font=("Microsoft YaHei UI", 10, "bold"))
+        self.canvas.create_oval(20, 15, 28, 23, fill=GOLD, outline="")
+        self.canvas.create_text(38, 20, anchor="w", text="慢慢赚钱", fill=TEXT_PRIMARY, font=("Microsoft YaHei UI", 10, "bold"))
         if self.weather_config.get("enabled"):
             if self.weather:
                 wind_copy = " · 有风" if self.weather.wind_speed >= 18 else ""
                 sky_copy = f"{weather_icon(self.weather.weather_code, self.weather.is_day)} {self.weather.city} · {weather_label(self.weather.weather_code)} {self.weather.temperature:.0f}°{wind_copy}"
             elif self.weather_config.get("city"):
-                sky_copy = f"{self.weather_config['city']} · 正在看天空"
+                sky_copy = f"{self.weather_config['city']} · 正在获取天气"
             else:
-                sky_copy = "选择一座城市，看看此刻的天空"
+                sky_copy = "可在设置中选择天气城市"
         else:
-            sky_copy = "今天也在悄悄变富"
-        self.canvas.create_text(43, 36, anchor="w", text=sky_copy, fill="#7FB4CA", font=("Microsoft YaHei UI", 8))
+            sky_copy = "本机计算 · 不上传工资与排班"
+        self.canvas.create_text(38, 36, anchor="w", text=sky_copy, fill=TEXT_MUTED, font=("Microsoft YaHei UI", 8))
 
-        self.rounded_box(284, 8, 312, 32, 10, fill="#123855", outline="#2B6080")
-        self.canvas.create_text(298, 20, text="⚙", fill="#C9F5FF", font=("Segoe UI Symbol", 11))
-        self.rounded_box(318, 8, 346, 32, 10, fill="#123855", outline="#2B6080")
-        self.canvas.create_text(332, 20, text="●", fill="#8DE7FF" if self.config["topmost"] else "#7890A0", font=("Segoe UI", 10, "bold"))
-        self.rounded_box(352, 8, 378, 32, 10, fill="#123855", outline="#2B6080")
-        self.canvas.create_text(365, 19, text="×", fill="#C9F5FF", font=("Segoe UI", 14))
+        settings_fill = "#1B455B" if self.hover_target == "settings" else "#102C40"
+        topmost_fill = "#1B455B" if self.hover_target == "topmost" else "#102C40"
+        close_fill = "#3D2E3B" if self.hover_target == "close" else "#102C40"
+        self.rounded_box(284, 8, 312, 32, 9, fill=settings_fill, outline="#2B536A")
+        self.canvas.create_text(298, 20, text="设", fill="#D2EDF3", font=("Microsoft YaHei UI", 8, "bold"))
+        self.rounded_box(318, 8, 346, 32, 9, fill=topmost_fill, outline="#2B536A")
+        self.canvas.create_text(332, 20, text="顶", fill="#83E2EC" if self.config["topmost"] else "#7893A1", font=("Microsoft YaHei UI", 8, "bold"))
+        self.rounded_box(352, 8, 378, 32, 9, fill=close_fill, outline="#2B536A")
+        self.canvas.create_text(365, 19, text="×", fill="#D2EDF3", font=("Segoe UI", 14))
 
         self.draw_arc(snapshot.progress)
         phase_label, _phrase = self.phase_copy(snapshot, now)
-        self.canvas.create_text(190, 112, text=format_money(snapshot.earned, self.config["currency"]), fill="#F2FCFF", font=("Segoe UI", 31, "bold"))
-        self.canvas.create_text(190, 143, text=f"日进斗金 · 约 {format_gold_weight(snapshot.earned)} 黄金", fill="#E4C675", font=("Microsoft YaHei UI", 10, "bold"))
-        self.canvas.create_text(190, 162, text="按 ¥280/g 历史参考价 · 不联网", fill="#88B8CB", font=("Microsoft YaHei UI", 8))
-        self.canvas.create_text(190, 186, text=format_percent(snapshot.progress), fill="#8DEAFF", font=("Segoe UI", 16, "bold"))
-        self.canvas.create_text(190, 208, text=f"{phase_label} · {self.detail_copy(snapshot, now)}", fill="#C4EAF6", font=("Microsoft YaHei UI", 9, "bold"))
+        self.canvas.create_text(190, 104, text="今日已积累", fill=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9))
+        self.canvas.create_text(190, 133, text=format_money(snapshot.earned, self.config["currency"]), fill="#F2FCFF", font=("Segoe UI", 29, "bold"))
+        self.canvas.create_text(190, 158, text=f"≈ {format_gold_weight(snapshot.earned)} 黄金", fill=GOLD, font=("Microsoft YaHei UI", 10, "bold"))
+        self.canvas.create_text(190, 175, text="按 ¥280/g 历史参考价", fill=TEXT_MUTED, font=("Microsoft YaHei UI", 8))
+        self.canvas.create_text(190, 198, text=format_percent(snapshot.progress), fill="#94E7EF", font=("Segoe UI", 15, "bold"))
+        self.canvas.create_text(190, 217, text=f"{phase_label} · {self.detail_copy(snapshot, now)}", fill="#C7E8EF", font=("Microsoft YaHei UI", 9, "bold"))
 
         focus_remaining = focus_remaining_seconds(self.focus_state, now)
         if self.toast_until and now < self.toast_until:
-            footer, footer_color = self.toast_message or "✓ 已按新参数重新计算", "#A4F5DD"
+            footer, footer_color = self.toast_message or "已按新设置重新计算", "#A4F5DD"
         elif focus_remaining is not None and focus_remaining > 0:
-            footer, footer_color = f"专注进行中 · 还剩 {format_countdown(focus_remaining)}", "#A4F5DD"
+            footer, footer_color = f"专注中 · 剩余 {format_countdown(focus_remaining)}", "#A4F5DD"
         elif focus_remaining == 0:
-            footer, footer_color = "这一段结束了，给自己一句回望", "#E4C675"
+            footer, footer_color = "这段专注结束了，可以记录一下", GOLD
         else:
-            footer, footer_color = "拖动空白处移动 · Ctrl+, 设置", "#7CAEC2"
+            footer, footer_color = "拖动空白处移动 · Ctrl+, 修改", TEXT_MUTED
         self.canvas.create_text(190, 230, text=footer, fill=footer_color, font=("Microsoft YaHei UI", 8))
-        self.rounded_box(20, 244, 198, 272, 13, fill="#10405F", outline="#3A94B8")
-        focus_button = f"专注 {format_countdown(focus_remaining)}" if focus_remaining is not None and focus_remaining > 0 else "回望这 25 分钟" if focus_remaining == 0 else "开始专注 25 分钟"
-        self.canvas.create_text(109, 258, text=focus_button, fill="#D5F8FF", font=("Microsoft YaHei UI", 9, "bold"))
-        self.rounded_box(207, 244, 360, 272, 13, fill="#173550", outline="#38627D")
-        self.canvas.create_text(284, 258, text="手动修改参数", fill="#C7E6F0", font=("Microsoft YaHei UI", 9, "bold"))
+        focus_fill = "#8DE5EF" if self.hover_target == "focus" else "#6BD6E6"
+        settings_button_fill = "#1B455B" if self.hover_target == "manual_settings" else "#112E43"
+        self.rounded_box(20, 244, 198, 272, 11, fill=focus_fill, outline="")
+        focus_button = f"专注 {format_countdown(focus_remaining)}" if focus_remaining is not None and focus_remaining > 0 else "记录这 25 分钟" if focus_remaining == 0 else "开始专注 25 分钟"
+        self.canvas.create_text(109, 258, text=focus_button, fill="#08212E", font=("Microsoft YaHei UI", 9, "bold"))
+        self.rounded_box(207, 244, 360, 272, 11, fill=settings_button_fill, outline="#2B536A")
+        self.canvas.create_text(284, 258, text="修改工作节奏", fill="#D1EAF1", font=("Microsoft YaHei UI", 9, "bold"))
 
     def phase_copy(self, snapshot: WorkSnapshot, now: datetime) -> tuple[str, str]:
         if snapshot.phase == "off":
-            return "今天留白", "不必追赶，休息也是日程的一部分。"
+            return "今天没有排班", ""
         if snapshot.phase == "upcoming":
-            return "尚未开场", "把开始留给自己准备好的那一刻。"
+            return "等待开始", ""
         if snapshot.phase == "pause":
-            return "节奏间歇", "短暂放松，下一段很快接上。"
+            return "休息时间", ""
         if snapshot.phase == "complete":
-            return "今天抵达", "这条弧已经完整，去享受你的时间。"
-        if now.hour < 11:
-            return "晨间推进中", "先完成最重要的那一小步。"
-        if now.hour < 15:
-            return "午后续航中", "慢一点也没关系，方向是对的。"
-        return "傍晚冲刺中", "把收尾做漂亮，今天就很值得。"
+            return "今日计薪已结束", ""
+        return "正在计薪", ""
 
     def detail_copy(self, snapshot: WorkSnapshot, now: datetime) -> str:
         if snapshot.phase == "earning":
@@ -1124,13 +1196,41 @@ class SlowEarnApp:
         next_day = now.date() + timedelta(days=1)
         while next_day.weekday() not in self.config["workdays"]:
             next_day += timedelta(days=1)
-        return f"{WEEKDAY_NAMES[next_day.weekday()]} 再见"
+        return f"下次 {WEEKDAY_NAMES[next_day.weekday()]}"
 
     def tick(self) -> None:
         self.refresh_weather_if_due()
         self.check_focus_completion()
         self.draw()
         self.root.after(1000, self.tick)
+
+    @staticmethod
+    def canvas_target(x: int, y: int) -> str | None:
+        if 284 <= x <= 312 and 8 <= y <= 32:
+            return "settings"
+        if 318 <= x <= 346 and 8 <= y <= 32:
+            return "topmost"
+        if 352 <= x <= 379 and 8 <= y <= 32:
+            return "close"
+        if 20 <= x <= 198 and 244 <= y <= 272:
+            return "focus"
+        if 207 <= x <= 360 and 244 <= y <= 272:
+            return "manual_settings"
+        return None
+
+    def on_motion(self, event: tk.Event[tk.Misc]) -> None:
+        target = self.canvas_target(event.x, event.y)
+        if target == self.hover_target:
+            return
+        self.hover_target = target
+        self.canvas.configure(cursor="hand2" if target else "")
+        self.draw()
+
+    def on_leave(self, _event: tk.Event[tk.Misc]) -> None:
+        if self.hover_target:
+            self.hover_target = None
+            self.canvas.configure(cursor="")
+            self.draw()
 
     def on_press(self, event: tk.Event[tk.Misc]) -> None:
         x, y = event.x, event.y
@@ -1166,53 +1266,26 @@ class SlowEarnApp:
         self.drag_origin = None
 
     def open_settings(self, welcome: bool = False) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("欢迎使用慢慢赚钱" if welcome else "调整今日节奏")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("460x540")
+        dialog = self.create_dialog("欢迎使用慢慢赚钱" if welcome else "修改工作节奏", 500, 650)
 
-        title = "先画出你的工作节奏" if welcome else "修改后，金额会立刻重算"
-        tk.Label(dialog, text=title, bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w", padx=26, pady=(22, 3))
-        tk.Label(dialog, text="默认只保存在本机；智能填写只发送你这次输入的描述。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=26, pady=(0, 8))
-        tk.Button(
-            dialog,
-            text="用一句话填写（使用你自己的 AI）",
-            command=lambda: self.open_ai_capture(dialog),
-            bg="#123C59",
-            fg="#CFF6FF",
-            activebackground="#1A5477",
-            activeforeground="#FFFFFF",
-            relief="flat",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            padx=12,
-            pady=6,
-        ).pack(anchor="w", padx=26, pady=(0, 10))
-        tk.Button(
-            dialog,
-            text="天空与天气（可选）",
-            command=self.open_weather_settings,
-            bg="#173550",
-            fg="#BFE6F2",
-            activebackground="#244967",
-            activeforeground="#FFFFFF",
-            relief="flat",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            padx=12,
-            pady=6,
-        ).pack(anchor="w", padx=26, pady=(0, 10))
+        title = "设置工作节奏" if welcome else "修改工作节奏"
+        subtitle = "月薪和排班只保存在这台电脑。保存后，主窗口会立即重算。"
+        tk.Label(dialog, text=title, bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text=subtitle, bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9), wraplength=440, justify="left").pack(anchor="w", padx=28, pady=(0, 14))
+        tk.Label(dialog, text="可选工具", bg=DIALOG_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 8, "bold")).pack(anchor="w", padx=28, pady=(0, 6))
+        tools_row = tk.Frame(dialog, bg=DIALOG_BG)
+        tools_row.pack(fill="x", padx=28, pady=(0, 16))
+        self.dialog_button(tools_row, "用我的 AI 生成草案", lambda: self.open_ai_capture(dialog), "secondary", padx=12, pady=6).pack(side="left")
+        self.dialog_button(tools_row, "设置天气城市", self.open_weather_settings, "quiet", padx=12, pady=6).pack(side="left", padx=(8, 0))
 
-        form = tk.Frame(dialog, bg="#0B2034")
+        form = tk.Frame(dialog, bg=DIALOG_BG)
         form.pack(fill="x", padx=26)
         form.columnconfigure(1, weight=1)
         entries: dict[str, tk.Entry] = {}
 
         def add_field(row: int, key: str, label: str, value: str) -> None:
-            tk.Label(form, text=label, bg="#0B2034", fg="#CBEAF5", font=("Microsoft YaHei UI", 9, "bold"), width=14, anchor="w").grid(row=row, column=0, sticky="w", pady=5)
-            entry = tk.Entry(form, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Segoe UI", 11))
+            tk.Label(form, text=label, bg=DIALOG_BG, fg="#CBEAF5", font=("Microsoft YaHei UI", 9, "bold"), width=14, anchor="w").grid(row=row, column=0, sticky="w", pady=5)
+            entry = tk.Entry(form, bg=SURFACE, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY, relief="flat", highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, font=("Segoe UI", 11))
             entry.insert(0, value)
             entry.grid(row=row, column=1, sticky="ew", ipady=6, pady=5)
             entries[key] = entry
@@ -1223,12 +1296,12 @@ class SlowEarnApp:
         add_field(2, "session_1", "第一时段", f"{sessions[0]['start']} - {sessions[0]['end']}")
         add_field(3, "session_2", "第二时段（可选）", f"{sessions[1]['start']} - {sessions[1]['end']}" if len(sessions) > 1 else "")
         add_field(4, "workdays", "每周工作日", "、".join(str(day + 1) for day in self.config["workdays"]))
-        tk.Label(dialog, text="时段格式：09:30 - 12:00；工作日填 1、2、3、4、5。", bg="#0B2034", fg="#789FB2", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(7, 0))
+        tk.Label(dialog, text="时段格式：09:30 - 12:00；工作日填写 1、2、3、4、5。", bg=DIALOG_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(8, 0))
 
-        error = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        error = tk.Label(dialog, text="", bg=DIALOG_BG, fg=ERROR, font=("Microsoft YaHei UI", 9), height=1)
         error.pack(anchor="w", padx=26, pady=(8, 0))
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(8, 20))
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(12, 24))
 
         def commit(_event: tk.Event[tk.Misc] | None = None) -> None:
             try:
@@ -1243,14 +1316,14 @@ class SlowEarnApp:
                 self.config = updated
                 save_config(self.config)
                 self.toast_until = datetime.now() + timedelta(seconds=5)
-                self.toast_message = "✓ 已按新参数重新计算"
+                self.toast_message = "已保存，金额已更新"
                 self.draw()
                 dialog.destroy()
             except ValueError as exc:
                 error.configure(text=str(exc))
 
-        tk.Button(buttons, text="取消", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=20, pady=8).pack(side="left")
-        tk.Button(buttons, text="保存并立即刷新", command=commit, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+        self.dialog_button(buttons, "取消", dialog.destroy, "quiet", padx=20, pady=8).pack(side="left")
+        self.dialog_button(buttons, "保存并更新", commit, "primary", padx=18, pady=8).pack(side="right")
         dialog.bind("<Control-s>", commit)
         dialog.bind("<Return>", commit)
         entries["salary"].focus_set()
@@ -1275,27 +1348,20 @@ class SlowEarnApp:
 
     def open_byok_settings(self) -> None:
         """Configure a single OpenAI-compatible connection without provider branding."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("连接你的 AI")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("500x445")
+        dialog = self.create_dialog("连接 AI 服务", 500, 485)
 
-        tk.Label(dialog, text="连接你的 AI", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
-        tk.Label(dialog, text="兼容 OpenAI 格式的服务或本地模型均可。没有服务商列表，也不会代你付费。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=442, justify="left").pack(anchor="w", padx=26)
-        tk.Label(dialog, text="密钥会由 Windows 加密保护，不会写入工资设置、日志或 Git 仓库。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(8, 14))
+        tk.Label(dialog, text="连接 AI 服务", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text="填写一个兼容 OpenAI 的地址和模型。应用不提供服务商，也不会替你支付费用。", bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9), wraplength=442, justify="left").pack(anchor="w", padx=28)
+        tk.Label(dialog, text="API Key 由当前 Windows 账户加密保存，不写入工资设置、日志或 Git 仓库。", bg=DIALOG_BG, fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=442, justify="left").pack(anchor="w", padx=28, pady=(8, 16))
 
-        form = tk.Frame(dialog, bg="#0B2034")
+        form = tk.Frame(dialog, bg=DIALOG_BG)
         form.pack(fill="x", padx=26)
         form.columnconfigure(1, weight=1)
         entries: dict[str, tk.Entry] = {}
 
         def add_field(row: int, key: str, label: str, value: str, secret: bool = False) -> None:
-            tk.Label(form, text=label, bg="#0B2034", fg="#CBEAF5", font=("Microsoft YaHei UI", 9, "bold"), width=12, anchor="w").grid(row=row, column=0, sticky="w", pady=6)
-            entry = tk.Entry(form, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Segoe UI", 10), show="•" if secret else "")
+            tk.Label(form, text=label, bg=DIALOG_BG, fg="#CBEAF5", font=("Microsoft YaHei UI", 9, "bold"), width=12, anchor="w").grid(row=row, column=0, sticky="w", pady=6)
+            entry = tk.Entry(form, bg=SURFACE, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY, relief="flat", highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, font=("Segoe UI", 10), show="•" if secret else "")
             entry.insert(0, value)
             entry.grid(row=row, column=1, sticky="ew", ipady=7, pady=6)
             entries[key] = entry
@@ -1305,11 +1371,11 @@ class SlowEarnApp:
         add_field(2, "api_key", "API Key", "", secret=True)
         add_field(3, "request_limit", "每月请求上限", str(self.ai_config.get("monthly_request_limit", 20)))
         hint = "已保存密钥；留空将继续使用它。" if load_api_key() else "密钥仅保存在这台电脑当前 Windows 账户下。"
-        tk.Label(dialog, text=f"{hint} 上限填 0 表示不限；应用不会自动重试请求。", bg="#0B2034", fg="#789FB2", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(7, 0))
-        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        tk.Label(dialog, text=f"{hint} 上限填 0 表示不限；应用不会自动重试。", bg=DIALOG_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(7, 0))
+        status = tk.Label(dialog, text="", bg=DIALOG_BG, fg=ERROR, font=("Microsoft YaHei UI", 9), height=1)
         status.pack(anchor="w", padx=26, pady=(8, 0))
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(7, 20))
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(12, 24))
 
         def save_connection() -> None:
             try:
@@ -1320,7 +1386,7 @@ class SlowEarnApp:
                     entries["request_limit"].get(),
                 )
                 self.toast_until = datetime.now() + timedelta(seconds=5)
-                self.toast_message = "✓ 已保存你的 AI 连接"
+                self.toast_message = "AI 连接已保存"
                 self.draw()
                 dialog.destroy()
             except (OSError, ValueError) as exc:
@@ -1337,51 +1403,44 @@ class SlowEarnApp:
                 forget_byok_connection()
                 self.ai_config = copy.deepcopy(DEFAULT_AI_CONFIG)
                 self.toast_until = datetime.now() + timedelta(seconds=5)
-                self.toast_message = "✓ 已断开并删除 AI 连接"
+                self.toast_message = "AI 连接已删除"
                 self.draw()
                 dialog.destroy()
             except OSError as exc:
                 status.configure(text=f"无法删除本机连接：{exc}")
 
-        tk.Button(buttons, text="断开并删除", command=forget_connection, bg="#482B39", fg="#FFD2D6", activebackground="#6A3D4C", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=12, pady=8).pack(side="left")
-        tk.Button(buttons, text="加密保存连接", command=save_connection, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+        self.dialog_button(buttons, "断开并删除", forget_connection, "danger", padx=12, pady=8).pack(side="left")
+        self.dialog_button(buttons, "保存连接", save_connection, "primary", padx=18, pady=8).pack(side="right")
         entries["base_url"].focus_set()
 
     def open_ai_capture(self, source_dialog: tk.Toplevel | None = None) -> None:
         """Collect only explicit user text, then ask BYOK for an editable proposal."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("用一句话设置")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("500x410")
+        dialog = self.create_dialog("生成工作节奏草案", 500, 430)
 
-        tk.Label(dialog, text="用一句话设置", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
-        tk.Label(dialog, text="例如：我月薪 4 万，每月按 22 天算，周一到周五 9:30 到 18:30，中午休息一个半小时。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=26)
-        tk.Label(dialog, text="本次只会发送下面这段文字；不会发送已保存的工资、排班或窗口位置。请勿粘贴合同、证件、客户资料或公司机密。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=26, pady=(8, 10))
+        tk.Label(dialog, text="生成工作节奏草案", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text="例如：月薪 4 万，每月按 22 天算，周一到周五 9:30 到 18:30，中午休息一个半小时。", bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=28)
+        tk.Label(dialog, text="只会发送下面这段文字，不会发送已保存的工资、排班或窗口位置。请不要粘贴合同、证件、客户资料或公司机密。", bg=DIALOG_BG, fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=28, pady=(8, 12))
 
-        note = tk.Text(dialog, height=7, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10), padx=10, pady=9, wrap="word")
+        note = tk.Text(dialog, height=7, bg=SURFACE, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY, relief="flat", highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, font=("Microsoft YaHei UI", 10), padx=10, pady=9, wrap="word")
         note.pack(fill="x", padx=26)
         request_count, request_limit, blocked_reason = self.ai_budget_status()
         if self.byok_ready():
             limit_text = "不限" if request_limit == 0 else f"{request_count}/{request_limit} 次"
-            connection_text = f"已连接你的 AI · 本月 {limit_text} · 可能产生你的服务费用"
+            connection_text = f"AI 已连接 · 本月 {limit_text} · 可能产生服务费用"
         else:
-            connection_text = "尚未连接 AI；你也可以始终使用手动设置。"
-        connection = tk.Label(dialog, text=connection_text, bg="#0B2034", fg="#79C5D4" if self.byok_ready() else "#E4C675", font=("Microsoft YaHei UI", 8))
+            connection_text = "尚未连接 AI；也可以直接手动填写。"
+        connection = tk.Label(dialog, text=connection_text, bg=DIALOG_BG, fg="#79C5D4" if self.byok_ready() else GOLD, font=("Microsoft YaHei UI", 8))
         connection.pack(anchor="w", padx=26, pady=(8, 0))
-        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        status = tk.Label(dialog, text="", bg=DIALOG_BG, fg=ERROR, font=("Microsoft YaHei UI", 9), height=1)
         status.pack(anchor="w", padx=26, pady=(7, 0))
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(6, 20))
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(10, 24))
 
         def confirm_proposal(proposed: dict[str, Any]) -> None:
             self.config = proposed
             save_config(self.config)
             self.toast_until = datetime.now() + timedelta(seconds=5)
-            self.toast_message = "✓ 已按新参数重新计算"
+            self.toast_message = "已应用新设置，金额已更新"
             self.draw()
             if source_dialog and source_dialog.winfo_exists():
                 source_dialog.destroy()
@@ -1392,7 +1451,7 @@ class SlowEarnApp:
                 return
             generate_button.configure(state="normal")
             if proposed is None:
-                status.configure(text=message, fg="#FFB39D")
+                status.configure(text=message, fg=ERROR)
                 return
             self.open_ai_proposal(proposed, confirm_proposal)
 
@@ -1402,11 +1461,11 @@ class SlowEarnApp:
                 return
             _request_count, _request_limit, blocked_reason = self.ai_budget_status()
             if blocked_reason:
-                status.configure(text=blocked_reason, fg="#FFB39D")
+                status.configure(text=blocked_reason, fg=ERROR)
                 return
             description = note.get("1.0", "end-1c")
             generate_button.configure(state="disabled")
-            status.configure(text="正在生成可确认的设置草案…", fg="#8DEAFF")
+            status.configure(text="正在生成草案…", fg="#8DEAFF")
             ai_config = copy.deepcopy(self.ai_config)
             existing_config = copy.deepcopy(self.config)
             api_key = load_api_key()
@@ -1422,25 +1481,18 @@ class SlowEarnApp:
 
             threading.Thread(target=worker, daemon=True).start()
 
-        tk.Button(buttons, text="连接我的 AI", command=self.open_byok_settings, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=14, pady=8).pack(side="left")
-        generate_button = tk.Button(buttons, text="生成设置草案", command=generate, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=16, pady=8)
+        self.dialog_button(buttons, "连接 AI", self.open_byok_settings, "quiet", padx=14, pady=8).pack(side="left")
+        generate_button = self.dialog_button(buttons, "生成草案", generate, "primary", padx=16, pady=8)
         generate_button.pack(side="right")
         note.focus_set()
 
     def open_ai_proposal(self, proposed: dict[str, Any], on_confirm: Any) -> None:
         """Show the model result as a proposal; it never changes salary settings itself."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("确认工作节奏")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("430x385")
+        dialog = self.create_dialog("检查工作节奏", 440, 405)
 
-        tk.Label(dialog, text="确认工作节奏", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
-        tk.Label(dialog, text="AI 只提出建议；确认前，不会修改任何金额或排班。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=26, pady=(0, 16))
-        details = tk.Frame(dialog, bg="#102B43", highlightthickness=1, highlightbackground="#2B5A77")
+        tk.Label(dialog, text="检查工作节奏", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text="这是 AI 生成的草案。确认前，金额和排班不会变化。", bg=DIALOG_BG, fg="#93D9CF", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=28, pady=(0, 16))
+        details = tk.Frame(dialog, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
         details.pack(fill="x", padx=26)
         sessions = "  ·  ".join(f"{item['start']}–{item['end']}" for item in proposed["sessions"])
         workdays = "、".join(WEEKDAY_NAMES[day] for day in proposed["workdays"])
@@ -1451,14 +1503,14 @@ class SlowEarnApp:
             ("每周工作日", workdays),
         )
         for label, value in values:
-            row = tk.Frame(details, bg="#102B43")
+            row = tk.Frame(details, bg=SURFACE)
             row.pack(fill="x", padx=14, pady=7)
-            tk.Label(row, text=label, width=10, anchor="w", bg="#102B43", fg="#8DB4C6", font=("Microsoft YaHei UI", 9)).pack(side="left")
-            tk.Label(row, text=value, anchor="e", bg="#102B43", fg="#EAFBFF", font=("Microsoft YaHei UI", 9, "bold")).pack(side="right")
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(18, 20))
-        tk.Button(buttons, text="返回修改", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="left")
-        tk.Button(buttons, text="确认启用", command=lambda: (on_confirm(proposed), dialog.destroy()), bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+            tk.Label(row, text=label, width=10, anchor="w", bg=SURFACE, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9)).pack(side="left")
+            tk.Label(row, text=value, anchor="e", bg=SURFACE, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 9, "bold")).pack(side="right")
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(18, 24))
+        self.dialog_button(buttons, "返回修改", dialog.destroy, "quiet", padx=18, pady=8).pack(side="left")
+        self.dialog_button(buttons, "应用这份设置", lambda: (on_confirm(proposed), dialog.destroy()), "primary", padx=18, pady=8).pack(side="right")
 
     def refresh_weather_if_due(self, force: bool = False) -> None:
         """Fetch selected-city weather at most once per 15 minutes in the background."""
@@ -1515,25 +1567,18 @@ class SlowEarnApp:
 
     def open_weather_settings(self) -> None:
         """Let people choose a city deliberately before any weather request happens."""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("天空与天气")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("500x475")
+        dialog = self.create_dialog("设置天气城市", 500, 510)
 
-        tk.Label(dialog, text="天空与天气", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
-        tk.Label(dialog, text="由你手动选择一座城市。开启后，每 15 分钟请求一次该城市的天气；不会获取设备定位。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=26)
-        tk.Label(dialog, text="天气数据：Open-Meteo。仅城市名与选中坐标会发送给天气服务。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=26, pady=(8, 14))
+        tk.Label(dialog, text="设置天气城市", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text="手动选择一座城市后，每 15 分钟获取一次天气。不读取设备定位。", bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=28)
+        tk.Label(dialog, text="天气数据来自 Open-Meteo；仅城市名和选中的坐标会发送给天气服务。", bg=DIALOG_BG, fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=28, pady=(8, 16))
 
-        search_row = tk.Frame(dialog, bg="#0B2034")
+        search_row = tk.Frame(dialog, bg=DIALOG_BG)
         search_row.pack(fill="x", padx=26)
-        city_entry = tk.Entry(search_row, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10))
+        city_entry = tk.Entry(search_row, bg=SURFACE, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY, relief="flat", highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, font=("Microsoft YaHei UI", 10))
         city_entry.insert(0, str(self.weather_config.get("city", "")))
         city_entry.pack(side="left", fill="x", expand=True, ipady=7)
-        results = tk.Listbox(dialog, height=5, bg="#102B43", fg="#DDF6FF", selectbackground="#245A78", selectforeground="#FFFFFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", font=("Microsoft YaHei UI", 9), activestyle="none")
+        results = tk.Listbox(dialog, height=5, bg=SURFACE, fg="#DDF6FF", selectbackground="#245A78", selectforeground="#FFFFFF", relief="flat", highlightthickness=1, highlightbackground=BORDER, font=("Microsoft YaHei UI", 9), activestyle="none")
         results.pack(fill="x", padx=26, pady=(10, 0))
         selected: dict[str, dict[str, Any] | None] = {"city": None}
         current = self.weather_config
@@ -1548,10 +1593,10 @@ class SlowEarnApp:
             }
 
         status_text = "当前未开启天气同步。" if not current.get("enabled") else f"当前显示：{current.get('city', '未选择城市')}。"
-        status = tk.Label(dialog, text=status_text, bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 8), height=2, anchor="w", justify="left", wraplength=444)
+        status = tk.Label(dialog, text=status_text, bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 8), height=2, anchor="w", justify="left", wraplength=444)
         status.pack(fill="x", padx=26, pady=(8, 0))
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(8, 20))
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(12, 24))
         candidates: list[dict[str, Any]] = []
 
         def set_selection(_event: tk.Event[tk.Misc] | None = None) -> None:
@@ -1566,18 +1611,18 @@ class SlowEarnApp:
             results.delete(0, "end")
             candidates.clear()
             if found is None:
-                status.configure(text=message, fg="#FFB39D")
+                status.configure(text=message, fg=ERROR)
                 return
             candidates.extend(found)
             if not candidates:
-                status.configure(text="没有找到匹配城市，请补充省份或国家。", fg="#FFB39D")
+                status.configure(text="没有找到匹配城市，请补充省份或国家。", fg=ERROR)
                 return
             for candidate in candidates:
                 suffix = " · ".join(part for part in (candidate["admin"], candidate["country"]) if part)
                 results.insert("end", f"{candidate['city']}" + (f" · {suffix}" if suffix else ""))
             results.selection_set(0)
             selected["city"] = candidates[0]
-            status.configure(text="选择结果后保存。城市名只在本机保存；所选坐标会用于请求天气。", fg="#93D9CF")
+            status.configure(text="选择一座城市后保存。城市名只保存在本机；选中的坐标用于获取天气。", fg="#93D9CF")
 
         def search() -> None:
             query = city_entry.get()
@@ -1585,7 +1630,7 @@ class SlowEarnApp:
                 if not query.strip():
                     raise ValueError("先输入城市名")
             except ValueError as exc:
-                status.configure(text=str(exc), fg="#FFB39D")
+                status.configure(text=str(exc), fg=ERROR)
                 return
             search_button.configure(state="disabled")
             status.configure(text="正在查询城市…", fg="#8DEAFF")
@@ -1603,7 +1648,7 @@ class SlowEarnApp:
         def save_city() -> None:
             candidate = selected["city"]
             if not candidate:
-                status.configure(text="先查询并选择一座城市", fg="#FFB39D")
+                status.configure(text="先查询并选择一座城市", fg=ERROR)
                 return
             self.weather_config = {
                 **DEFAULT_WEATHER_CONFIG,
@@ -1636,11 +1681,11 @@ class SlowEarnApp:
             self.draw()
             dialog.destroy()
 
-        search_button = tk.Button(search_row, text="查询城市", command=search, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=13, pady=7)
+        search_button = self.dialog_button(search_row, "查询城市", search, "secondary", padx=13, pady=7)
         search_button.pack(side="right", padx=(8, 0))
         results.bind("<<ListboxSelect>>", set_selection)
-        tk.Button(buttons, text="关闭并清除", command=clear_weather, bg="#482B39", fg="#FFD2D6", activebackground="#6A3D4C", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=12, pady=8).pack(side="left")
-        tk.Button(buttons, text="保存并显示", command=save_city, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+        self.dialog_button(buttons, "关闭并清除", clear_weather, "danger", padx=12, pady=8).pack(side="left")
+        self.dialog_button(buttons, "保存并显示", save_city, "primary", padx=18, pady=8).pack(side="right")
         city_entry.focus_set()
 
     def check_focus_completion(self) -> None:
@@ -1652,23 +1697,16 @@ class SlowEarnApp:
         self.open_focus_reflection()
 
     def open_focus_start(self) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("开始专注")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("430x270")
+        dialog = self.create_dialog("开始 25 分钟", 440, 288)
 
-        tk.Label(dialog, text="把这 25 分钟留给什么？", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(24, 4))
-        tk.Label(dialog, text="可以留空。结束时不打分，只问这段时间留下些什么。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=26, pady=(0, 16))
-        note = tk.Entry(dialog, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10))
+        tk.Label(dialog, text="这 25 分钟留给什么？", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
+        tk.Label(dialog, text="可以留空。结束时只记录这段时间的状态，不评分。", bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=28, pady=(0, 16))
+        note = tk.Entry(dialog, bg=SURFACE, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY, relief="flat", highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT, font=("Microsoft YaHei UI", 10))
         note.pack(fill="x", padx=26, ipady=8)
-        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        status = tk.Label(dialog, text="", bg=DIALOG_BG, fg=ERROR, font=("Microsoft YaHei UI", 9), height=1)
         status.pack(anchor="w", padx=26, pady=(8, 0))
-        buttons = tk.Frame(dialog, bg="#0B2034")
-        buttons.pack(fill="x", padx=26, pady=(12, 20))
+        buttons = tk.Frame(dialog, bg=DIALOG_BG)
+        buttons.pack(fill="x", padx=26, pady=(12, 24))
 
         def begin() -> None:
             try:
@@ -1677,14 +1715,14 @@ class SlowEarnApp:
                 self.focus_completion_open = False
                 self.focus_reminder_at = None
                 self.toast_until = datetime.now() + timedelta(seconds=4)
-                self.toast_message = "25 分钟，慢慢来"
+                self.toast_message = "专注已开始"
                 self.draw()
                 dialog.destroy()
             except ValueError as exc:
                 status.configure(text=str(exc))
 
-        tk.Button(buttons, text="稍后再说", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=16, pady=8).pack(side="left")
-        tk.Button(buttons, text="开始 25 分钟", command=begin, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=16, pady=8).pack(side="right")
+        self.dialog_button(buttons, "稍后", dialog.destroy, "quiet", padx=16, pady=8).pack(side="left")
+        self.dialog_button(buttons, "开始专注", begin, "primary", padx=16, pady=8).pack(side="right")
         note.focus_set()
 
     def open_focus_reflection(self, allow_early: bool = False) -> None:
@@ -1695,25 +1733,18 @@ class SlowEarnApp:
         if remaining is not None and remaining > 0 and not allow_early:
             return
         self.focus_completion_open = True
-        dialog = tk.Toplevel(self.root)
-        dialog.title("这一段留下些什么")
-        dialog.configure(bg="#0B2034")
-        dialog.resizable(False, False)
-        dialog.transient(self.root)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.geometry("430x342")
+        dialog = self.create_dialog("记录这一段", 440, 360)
 
         elapsed_seconds = FOCUS_DURATION_MINUTES * 60 if remaining is None else max(1, FOCUS_DURATION_MINUTES * 60 - round(remaining))
         minutes = max(1, round(elapsed_seconds / 60))
-        tk.Label(dialog, text=f"这 {minutes} 分钟，留下些什么？", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
+        tk.Label(dialog, text=f"这 {minutes} 分钟过去了，哪一句更接近？", bg=DIALOG_BG, fg=TEXT_PRIMARY, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=28, pady=(26, 4))
         note = active.get("note", "")
         if note:
-            tk.Label(dialog, text=f"你刚才想做：{note}", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=378, justify="left").pack(anchor="w", padx=26, pady=(0, 7))
-        tk.Label(dialog, text="不评分，也不判断好坏。选一个最贴近此刻的答案。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(0, 14))
-        options = tk.Frame(dialog, bg="#0B2034")
+            tk.Label(dialog, text=f"刚才想做：{note}", bg=DIALOG_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9), wraplength=378, justify="left").pack(anchor="w", padx=28, pady=(0, 7))
+        tk.Label(dialog, text="不对结果打分，只记下当时的状态。", bg=DIALOG_BG, fg="#93D9CF", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=28, pady=(0, 14))
+        options = tk.Frame(dialog, bg=DIALOG_BG)
         options.pack(fill="x", padx=26)
-        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        status = tk.Label(dialog, text="", bg=DIALOG_BG, fg=ERROR, font=("Microsoft YaHei UI", 9), height=1)
         status.pack(anchor="w", padx=26, pady=(8, 0))
 
         def postpone() -> None:
@@ -1729,7 +1760,7 @@ class SlowEarnApp:
                 self.focus_reminder_at = None
                 if reflection == "restore":
                     self.toast_until = datetime.now() + timedelta(seconds=6)
-                    self.toast_message = "这 25 分钟，已经好好安放"
+                    self.toast_message = "这段时间已记录"
                     self.draw()
                 else:
                     value = focus_value(self.config, float(record["elapsed_seconds"]))
@@ -1740,13 +1771,13 @@ class SlowEarnApp:
             except ValueError as exc:
                 status.configure(text=str(exc))
 
-        for key, text, color in (
-            ("advance", "推进了一件事", "#173D59"),
-            ("sustain", "维持住了节奏", "#173550"),
-            ("restore", "好好休息了", "#27454D"),
+        for key, text, kind in (
+            ("advance", "推进了事情", "secondary"),
+            ("sustain", "保持了节奏", "secondary"),
+            ("restore", "休息得不错", "quiet"),
         ):
-            tk.Button(options, text=text, command=lambda choice=key: reflect(choice), bg=color, fg="#D5F8FF", activebackground="#2B6078", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), pady=8).pack(fill="x", pady=3)
-        tk.Button(dialog, text="五分钟后再问", command=postpone, bg="#0B2034", fg="#7CAEC2", activebackground="#173550", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 8), pady=4).pack(pady=(7, 12))
+            self.dialog_button(options, text, lambda choice=key: reflect(choice), kind, pady=8).pack(fill="x", pady=3)
+        self.dialog_button(dialog, "五分钟后再问", postpone, "quiet", font=("Microsoft YaHei UI", 8), pady=4).pack(pady=(8, 14))
         dialog.protocol("WM_DELETE_WINDOW", postpone)
 
     def close(self) -> None:
