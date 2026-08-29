@@ -26,6 +26,7 @@ from urllib.parse import urlencode, urlparse
 
 
 APP_NAME = "慢慢赚钱"
+APP_VERSION = "0.3.0"
 WINDOW_WIDTH = 380
 WINDOW_HEIGHT = 280
 TRANSPARENT_COLOR = "#00ff01"

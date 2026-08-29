@@ -1,5 +1,7 @@
 # 慢慢赚钱 · 今日价值弧
 
+**v0.3.0 · 活着的工作桌面**
+
 一个本地优先的 Windows 桌面小组件：它用一条冰蓝色的工作弧和“日进斗金”的黄金等值，让你在抬眼之间看见今天已经积累的价值。
 
 慢慢赚钱是独立设计与实现的开源项目。全部代码、界面结构、中文文案和视觉元素均从零编写；没有复制其他项目的代码、素材、界面或文案。默认不接入网络、没有账号体系；你填入的数字和工作时间只保存在自己的电脑中。若你主动开启 BYOK 智能填写，应用才会向你亲自配置的 AI 服务发送那一次输入的自然语言描述。
@@ -22,7 +24,7 @@
 
 ## 隐私与 BYOK
 
-- 默认离线：不用“一句话填写”时，项目没有网络请求、账号体系或遥测代码。
+- 默认离线：不启用“一句话填写”或“天空与天气”时，项目没有网络请求、账号体系或遥测代码。
 - 不收集：不会读取浏览记录、文件内容、剪贴板或系统身份信息。
 - 仅本地保存：配置位于 `%LOCALAPPDATA%\慢慢赚钱\settings.json`（Windows）。删除该文件即可恢复默认状态。
 - BYOK 按需发送：点击“生成设置草案”后，应用只会发送该文本框里的描述，不发送已保存的工资、排班、窗口位置或历史记录。请勿粘贴劳动合同、证件、客户资料或公司机密；对应 AI 服务仍会依其自己的隐私政策处理这段文字。
@@ -80,6 +82,22 @@ python manmanzhuanqian.py
 
 只有排定的工作时段会累计；两个时段之间的休息时间不会计入。若结束时间早于开始时间，例如 `22:00 - 06:00`，慢慢赚钱会把它视为跨午夜班次。
 
+## 下载与运行 Windows 版本
+
+在 [Releases](https://github.com/virtue192/manmanzhuanqian/releases) 下载最新版：
+
+- `manmanzhuanqian.exe`：免安装单文件，双击即可运行；不会写入系统目录。
+- `manmanzhuanqian-vX.Y.Z-windows-x64.zip`：同一文件的压缩包，适合浏览器拦截 `.exe` 下载时使用。
+- `SHA256SUMS.txt`：发布文件的 SHA-256 校验值，可用于确认下载未被篡改。
+
+首次运行会在你自己的 `%LOCALAPPDATA%\慢慢赚钱` 下创建本地设置。删除该目录即可移除全部本地数据；程序本身没有后台服务、开机自启或卸载残留。
+
+当前发布文件尚未使用商业代码签名证书。Windows 可能会显示来源提示；请只从本仓库的 Release 下载，并按 `SHA256SUMS.txt` 校验文件哈希。可以在 PowerShell 中运行：
+
+```powershell
+Get-FileHash .\manmanzhuanqian.exe -Algorithm SHA256
+```
+
 ## 打包为单文件程序
 
 项目运行时没有第三方依赖。若希望打包成可分发的 Windows 程序，只在开发环境安装 PyInstaller：
@@ -89,14 +107,14 @@ python -m pip install -r requirements-dev.txt
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name manmanzhuanqian manmanzhuanqian.py
 ```
 
-生成的程序位于 `dist\manmanzhuanqian.exe`（应用内仍显示“慢慢赚钱”）。仓库已包含 GitHub Actions：推送 `v*` 标签后会自动构建可下载的 Windows 文件。
+生成的程序位于 `dist\manmanzhuanqian.exe`（应用内仍显示“慢慢赚钱”）。仓库已包含 GitHub Actions：推送 `v*` 标签后会自动构建 `.exe`、ZIP 下载包和 SHA-256 校验文件。
 
 ## 为 GitHub 发布准备
 
 1. 新建一个空的 GitHub 仓库，例如 `manmanzhuanqian`。
 2. 将本目录全部推送到该仓库。
 3. 在 GitHub 的仓库设置中启用 Actions。
-4. 创建并推送一个形如 `v0.1.0` 的标签，即可触发自动发布。
+4. 创建并推送一个形如 `v0.3.0` 的标签，即可触发自动发布。
 
 在发布前，请保持 `.gitignore` 原样，且不要把本机的 `%LOCALAPPDATA%\慢慢赚钱\settings.json`、`ai.json`、`byok.key`、`sky.json` 或 `focus.json` 添加到仓库。
 
