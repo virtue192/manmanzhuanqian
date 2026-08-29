@@ -1,19 +1,25 @@
-from datetime import datetime
+from datetime import date, datetime
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from manmanzhuanqian import (
     DEFAULT_CONFIG,
+    ai_request_guard,
     config_from_ai_response,
     config_from_form,
     format_gold_weight,
     format_percent,
+    forget_byok_connection,
     get_snapshot,
     normalise_ai_base_url,
+    normalise_ai_usage_period,
     normalise_sessions,
     parse_clock,
     request_schedule_suggestion,
+    save_byok_connection,
 )
 
 
@@ -118,6 +124,44 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["content"], description)
         self.assertNotIn("monthly_salary", payload["messages"][1]["content"])
         self.assertEqual(usage["prompt_tokens"], 12)
+
+    def test_ai_budget_blocks_current_month_and_resets_next_month(self) -> None:
+        config = {
+            "base_url": "https://api.example.com/v1",
+            "model": "my-model",
+            "monthly_request_limit": 2,
+            "usage_month": "2026-08",
+            "request_count": 2,
+            "input_tokens": 12,
+            "output_tokens": 5,
+        }
+        current, reason = ai_request_guard(config, date(2026, 8, 29))
+        self.assertEqual(current["request_count"], 2)
+        self.assertIn("上限", reason or "")
+        next_month, reason = ai_request_guard(config, date(2026, 9, 1))
+        self.assertIsNone(reason)
+        self.assertEqual(next_month["request_count"], 0)
+        self.assertEqual(next_month["usage_month"], "2026-09")
+
+    def test_forgetting_byok_connection_removes_only_its_two_local_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            key_file = folder / "byok.key"
+            config_file = folder / "ai.json"
+            keep_file = folder / "settings.json"
+            key_file.write_bytes(b"encrypted")
+            config_file.write_text("{}", encoding="utf-8")
+            keep_file.write_text('{"monthly_salary": 40000}', encoding="utf-8")
+            forget_byok_connection(key_file, config_file)
+            self.assertFalse(key_file.exists())
+            self.assertFalse(config_file.exists())
+            self.assertTrue(keep_file.exists())
+
+    def test_invalid_budget_does_not_write_a_new_api_key(self) -> None:
+        with patch("manmanzhuanqian.save_api_key") as save_key:
+            with self.assertRaises(ValueError):
+                save_byok_connection("https://api.example.com/v1", "my-model", "new-key", "not-a-number")
+        save_key.assert_not_called()
 
 
 if __name__ == "__main__":

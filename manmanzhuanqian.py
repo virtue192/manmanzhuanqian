@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import tkinter as tk
+from tkinter import messagebox
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 DEFAULT_AI_CONFIG: dict[str, Any] = {
     "base_url": "",
     "model": "",
+    "monthly_request_limit": 20,
+    "usage_month": "",
     "request_count": 0,
     "input_tokens": 0,
     "output_tokens": 0,
@@ -212,6 +215,14 @@ def _safe_ai_config(raw: Any) -> dict[str, Any]:
         if len(model) > 160:
             raise ValueError
         config["model"] = model
+        request_limit = raw.get("monthly_request_limit", config["monthly_request_limit"])
+        if isinstance(request_limit, bool) or not isinstance(request_limit, (int, float)) or not 0 <= request_limit <= 10_000:
+            raise ValueError
+        config["monthly_request_limit"] = int(request_limit)
+        usage_month = str(raw.get("usage_month", ""))
+        if usage_month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", usage_month):
+            raise ValueError
+        config["usage_month"] = usage_month
         for field in ("request_count", "input_tokens", "output_tokens"):
             value = raw.get(field, 0)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
@@ -291,7 +302,41 @@ def load_api_key(path: Path | None = None) -> str:
         return ""
 
 
-def save_byok_connection(base_url: str, model: str, api_key: str = "") -> dict[str, Any]:
+def forget_byok_connection(key_path: Path | None = None, config_path: Path | None = None) -> None:
+    """Remove the protected key and local, non-secret connection metadata."""
+    for path in (key_path or ai_key_path(), config_path or ai_config_path()):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def current_usage_month(today: date | None = None) -> str:
+    return (today or date.today()).strftime("%Y-%m")
+
+
+def normalise_ai_usage_period(config: dict[str, Any], today: date | None = None) -> dict[str, Any]:
+    """Reset locally recorded usage at the beginning of a calendar month."""
+    updated = _safe_ai_config(config)
+    month = current_usage_month(today)
+    if updated["usage_month"] != month:
+        updated["usage_month"] = month
+        updated["request_count"] = 0
+        updated["input_tokens"] = 0
+        updated["output_tokens"] = 0
+    return updated
+
+
+def ai_request_guard(config: dict[str, Any], today: date | None = None) -> tuple[dict[str, Any], str | None]:
+    """Return a refreshed usage record and an optional no-request reason."""
+    updated = normalise_ai_usage_period(config, today)
+    limit = int(updated["monthly_request_limit"])
+    if limit and int(updated["request_count"]) >= limit:
+        return updated, f"已达到本月 {limit} 次智能请求上限；可在“连接我的 AI”中调整。"
+    return updated, None
+
+
+def save_byok_connection(base_url: str, model: str, api_key: str = "", monthly_request_limit: str | int | None = None) -> dict[str, Any]:
     """Save non-secret connection data and, if supplied, the protected key."""
     cleaned_model = model.strip()
     if not cleaned_model:
@@ -299,6 +344,14 @@ def save_byok_connection(base_url: str, model: str, api_key: str = "") -> dict[s
     if len(cleaned_model) > 160:
         raise ValueError("模型名称过长")
     normalised_url = normalise_ai_base_url(base_url)
+    limit: int | None = None
+    if monthly_request_limit is not None:
+        try:
+            limit = int(str(monthly_request_limit).strip())
+        except ValueError as exc:
+            raise ValueError("每月请求上限请填写整数") from exc
+        if not 0 <= limit <= 10_000:
+            raise ValueError("每月请求上限应在 0 到 10000 之间")
     if api_key.strip():
         save_api_key(api_key)
     elif not load_api_key():
@@ -306,6 +359,9 @@ def save_byok_connection(base_url: str, model: str, api_key: str = "") -> dict[s
     config = load_ai_config()
     config["base_url"] = normalised_url
     config["model"] = cleaned_model
+    if limit is not None:
+        config["monthly_request_limit"] = limit
+    config = normalise_ai_usage_period(config)
     save_ai_config(config)
     return config
 
@@ -749,6 +805,7 @@ class SlowEarnApp:
 
     def record_ai_usage(self, usage: dict[str, Any]) -> None:
         """Keep a local-only count; model prices are intentionally never guessed."""
+        self.ai_config = normalise_ai_usage_period(self.ai_config)
         self.ai_config["request_count"] = int(self.ai_config.get("request_count", 0)) + 1
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0))
@@ -756,6 +813,10 @@ class SlowEarnApp:
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
                 self.ai_config[field] = int(self.ai_config.get(field, 0)) + int(value)
         save_ai_config(self.ai_config)
+
+    def ai_budget_status(self) -> tuple[int, int, str | None]:
+        self.ai_config, blocked_reason = ai_request_guard(self.ai_config)
+        return int(self.ai_config["request_count"]), int(self.ai_config["monthly_request_limit"]), blocked_reason
 
     def open_byok_settings(self) -> None:
         """Configure a single OpenAI-compatible connection without provider branding."""
@@ -766,7 +827,7 @@ class SlowEarnApp:
         dialog.transient(self.root)
         dialog.attributes("-topmost", True)
         dialog.grab_set()
-        dialog.geometry("500x390")
+        dialog.geometry("500x445")
 
         tk.Label(dialog, text="连接你的 AI", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
         tk.Label(dialog, text="兼容 OpenAI 格式的服务或本地模型均可。没有服务商列表，也不会代你付费。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=442, justify="left").pack(anchor="w", padx=26)
@@ -787,8 +848,9 @@ class SlowEarnApp:
         add_field(0, "base_url", "API 地址", str(self.ai_config.get("base_url", "")))
         add_field(1, "model", "模型名称", str(self.ai_config.get("model", "")))
         add_field(2, "api_key", "API Key", "", secret=True)
+        add_field(3, "request_limit", "每月请求上限", str(self.ai_config.get("monthly_request_limit", 20)))
         hint = "已保存密钥；留空将继续使用它。" if load_api_key() else "密钥仅保存在这台电脑当前 Windows 账户下。"
-        tk.Label(dialog, text=hint, bg="#0B2034", fg="#789FB2", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(7, 0))
+        tk.Label(dialog, text=f"{hint} 上限填 0 表示不限；应用不会自动重试请求。", bg="#0B2034", fg="#789FB2", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(7, 0))
         status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
         status.pack(anchor="w", padx=26, pady=(8, 0))
         buttons = tk.Frame(dialog, bg="#0B2034")
@@ -796,14 +858,35 @@ class SlowEarnApp:
 
         def save_connection() -> None:
             try:
-                self.ai_config = save_byok_connection(entries["base_url"].get(), entries["model"].get(), entries["api_key"].get())
+                self.ai_config = save_byok_connection(
+                    entries["base_url"].get(),
+                    entries["model"].get(),
+                    entries["api_key"].get(),
+                    entries["request_limit"].get(),
+                )
                 self.toast_until = datetime.now() + timedelta(seconds=5)
                 self.draw()
                 dialog.destroy()
             except (OSError, ValueError) as exc:
                 status.configure(text=str(exc))
 
-        tk.Button(buttons, text="取消", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=20, pady=8).pack(side="left")
+        def forget_connection() -> None:
+            if not messagebox.askyesno(
+                "断开你的 AI",
+                "这会删除本机加密保存的 API Key、服务地址、模型名称和本机用量记录，且无法恢复。\n\n工资与工作节奏不会受到影响。",
+                parent=dialog,
+            ):
+                return
+            try:
+                forget_byok_connection()
+                self.ai_config = copy.deepcopy(DEFAULT_AI_CONFIG)
+                self.toast_until = datetime.now() + timedelta(seconds=5)
+                self.draw()
+                dialog.destroy()
+            except OSError as exc:
+                status.configure(text=f"无法删除本机连接：{exc}")
+
+        tk.Button(buttons, text="断开并删除", command=forget_connection, bg="#482B39", fg="#FFD2D6", activebackground="#6A3D4C", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=12, pady=8).pack(side="left")
         tk.Button(buttons, text="加密保存连接", command=save_connection, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
         entries["base_url"].focus_set()
 
@@ -820,11 +903,16 @@ class SlowEarnApp:
 
         tk.Label(dialog, text="用一句话设置", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
         tk.Label(dialog, text="例如：我月薪 4 万，每月按 22 天算，周一到周五 9:30 到 18:30，中午休息一个半小时。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=26)
-        tk.Label(dialog, text="本次只会发送下面这段文字；不会发送已保存的工资、排班或窗口位置。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=26, pady=(8, 10))
+        tk.Label(dialog, text="本次只会发送下面这段文字；不会发送已保存的工资、排班或窗口位置。请勿粘贴合同、证件、客户资料或公司机密。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=26, pady=(8, 10))
 
         note = tk.Text(dialog, height=7, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10), padx=10, pady=9, wrap="word")
         note.pack(fill="x", padx=26)
-        connection_text = f"已连接你的 AI · 本机累计 {int(self.ai_config.get('request_count', 0))} 次请求" if self.byok_ready() else "尚未连接 AI；你也可以始终使用手动设置。"
+        request_count, request_limit, blocked_reason = self.ai_budget_status()
+        if self.byok_ready():
+            limit_text = "不限" if request_limit == 0 else f"{request_count}/{request_limit} 次"
+            connection_text = f"已连接你的 AI · 本月 {limit_text} · 可能产生你的服务费用"
+        else:
+            connection_text = "尚未连接 AI；你也可以始终使用手动设置。"
         connection = tk.Label(dialog, text=connection_text, bg="#0B2034", fg="#79C5D4" if self.byok_ready() else "#E4C675", font=("Microsoft YaHei UI", 8))
         connection.pack(anchor="w", padx=26, pady=(8, 0))
         status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
@@ -853,6 +941,10 @@ class SlowEarnApp:
         def generate() -> None:
             if not self.byok_ready():
                 status.configure(text="请先连接你的 AI")
+                return
+            _request_count, _request_limit, blocked_reason = self.ai_budget_status()
+            if blocked_reason:
+                status.configure(text=blocked_reason, fg="#FFB39D")
                 return
             description = note.get("1.0", "end-1c")
             generate_button.configure(state="disabled")
