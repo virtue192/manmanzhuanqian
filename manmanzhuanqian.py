@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 
 APP_NAME = "慢慢赚钱"
@@ -33,6 +33,8 @@ TRANSPARENT_COLOR = "#00ff01"
 HISTORICAL_GOLD_PRICE_PER_GRAM = 280.0
 AI_REQUEST_TIMEOUT_SECONDS = 25
 MAX_AI_DESCRIPTION_LENGTH = 1500
+WEATHER_REFRESH_MINUTES = 15
+WEATHER_REQUEST_TIMEOUT_SECONDS = 10
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "monthly_salary": 15000.0,
@@ -61,6 +63,18 @@ DEFAULT_AI_CONFIG: dict[str, Any] = {
     "output_tokens": 0,
 }
 
+# Weather is opt-in. A user selects a city explicitly; the app never asks the
+# operating system for a device location or runs a weather request while off.
+DEFAULT_WEATHER_CONFIG: dict[str, Any] = {
+    "enabled": False,
+    "city": "",
+    "latitude": None,
+    "longitude": None,
+    "timezone": "",
+    "last_weather": None,
+    "last_refreshed": "",
+}
+
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
@@ -81,6 +95,11 @@ def ai_config_path() -> Path:
 def ai_key_path() -> Path:
     """Return the Windows-DPAPI-protected API-key path."""
     return local_data_path().with_name("byok.key")
+
+
+def weather_config_path() -> Path:
+    """Return the optional, local-only weather preference and cache path."""
+    return local_data_path().with_name("sky.json")
 
 
 def parse_clock(value: str) -> int:
@@ -471,6 +490,221 @@ def request_schedule_suggestion(description: str, ai_config: dict[str, Any], api
     return content, usage if isinstance(usage, dict) else {}
 
 
+def _weather_coordinate(value: Any, minimum: float, maximum: float) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError
+    number = float(value)
+    if not minimum <= number <= maximum:
+        raise ValueError
+    return number
+
+
+def _safe_weather_config(raw: Any) -> dict[str, Any]:
+    config = copy.deepcopy(DEFAULT_WEATHER_CONFIG)
+    if not isinstance(raw, dict):
+        return config
+    try:
+        config["enabled"] = bool(raw.get("enabled", False))
+        city = str(raw.get("city", "")).strip()
+        if len(city) > 100:
+            raise ValueError
+        config["city"] = city
+        config["latitude"] = _weather_coordinate(raw.get("latitude"), -90, 90)
+        config["longitude"] = _weather_coordinate(raw.get("longitude"), -180, 180)
+        timezone_name = str(raw.get("timezone", "")).strip()
+        if len(timezone_name) > 80:
+            raise ValueError
+        config["timezone"] = timezone_name
+        refreshed = str(raw.get("last_refreshed", ""))
+        if refreshed:
+            datetime.fromisoformat(refreshed)
+        config["last_refreshed"] = refreshed
+        cached = raw.get("last_weather")
+        if cached is not None:
+            config["last_weather"] = _safe_weather_cache(cached)
+    except (TypeError, ValueError):
+        return copy.deepcopy(DEFAULT_WEATHER_CONFIG)
+    return config
+
+
+def _safe_weather_cache(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError
+    code = raw.get("weather_code")
+    if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 99:
+        raise ValueError
+    temperature = _number_from_ai(raw.get("temperature"), "气温", -100, 100)
+    wind_speed = _number_from_ai(raw.get("wind_speed"), "风速", 0, 300)
+    is_day = raw.get("is_day")
+    if not isinstance(is_day, bool):
+        raise ValueError
+    observed_at = str(raw.get("observed_at", ""))
+    if observed_at:
+        datetime.fromisoformat(observed_at)
+    return {
+        "weather_code": code,
+        "temperature": temperature,
+        "wind_speed": wind_speed,
+        "is_day": is_day,
+        "observed_at": observed_at,
+    }
+
+
+def load_weather_config(path: Path | None = None) -> dict[str, Any]:
+    path = path or weather_config_path()
+    try:
+        return _safe_weather_config(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return copy.deepcopy(DEFAULT_WEATHER_CONFIG)
+
+
+def save_weather_config(config: dict[str, Any], path: Path | None = None) -> None:
+    path = path or weather_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(_safe_weather_config(config), ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+@dataclass(frozen=True)
+class WeatherSnapshot:
+    city: str
+    weather_code: int
+    temperature: float
+    wind_speed: float
+    is_day: bool
+    observed_at: str
+
+
+def weather_snapshot_from_config(config: dict[str, Any]) -> WeatherSnapshot | None:
+    cached = config.get("last_weather")
+    city = str(config.get("city", ""))
+    if not cached or not city:
+        return None
+    try:
+        clean = _safe_weather_cache(cached)
+        return WeatherSnapshot(city=city, **clean)
+    except ValueError:
+        return None
+
+
+def weather_label(code: int) -> str:
+    if code == 0:
+        return "晴朗"
+    if code in {1, 2}:
+        return "有云"
+    if code == 3:
+        return "阴天"
+    if code in {45, 48}:
+        return "有雾"
+    if code in {51, 53, 55, 56, 57}:
+        return "细雨"
+    if code in {61, 63, 65, 66, 67, 80, 81, 82}:
+        return "下雨"
+    if code in {71, 73, 75, 77, 85, 86}:
+        return "下雪"
+    if code in {95, 96, 99}:
+        return "雷雨"
+    return "天空变化中"
+
+
+def weather_icon(code: int, is_day: bool) -> str:
+    if code == 0:
+        return "☀" if is_day else "☾"
+    if code in {1, 2, 3}:
+        return "☁"
+    if code in {45, 48}:
+        return "≋"
+    if code in {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82}:
+        return "☂"
+    if code in {71, 73, 75, 77, 85, 86}:
+        return "❄"
+    if code in {95, 96, 99}:
+        return "ϟ"
+    return "·"
+
+
+def search_cities(query: str) -> list[dict[str, Any]]:
+    """Search a city only after a user has explicitly entered its name."""
+    name = query.strip()
+    if not name:
+        raise ValueError("先输入城市名")
+    if len(name) > 80:
+        raise ValueError("城市名过长")
+    url = "https://geocoding-api.open-meteo.com/v1/search?" + urlencode({"name": name, "count": 5, "language": "zh", "format": "json"})
+    try:
+        with urlrequest.urlopen(url, timeout=WEATHER_REQUEST_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("无法查询城市，请检查网络后重试") from exc
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for item in results[:5]:
+        try:
+            if not isinstance(item, dict):
+                continue
+            city = str(item.get("name", "")).strip()
+            latitude = _weather_coordinate(item.get("latitude"), -90, 90)
+            longitude = _weather_coordinate(item.get("longitude"), -180, 180)
+            if not city or latitude is None or longitude is None:
+                continue
+            candidates.append({
+                "city": city[:100],
+                "admin": str(item.get("admin1", "")).strip()[:80],
+                "country": str(item.get("country", "")).strip()[:80],
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": str(item.get("timezone", "")).strip()[:80],
+            })
+        except (TypeError, ValueError):
+            continue
+    return candidates
+
+
+def request_current_weather(config: dict[str, Any]) -> WeatherSnapshot:
+    """Fetch current conditions for a previously selected city, never a device location."""
+    city = str(config.get("city", "")).strip()
+    latitude = _weather_coordinate(config.get("latitude"), -90, 90)
+    longitude = _weather_coordinate(config.get("longitude"), -180, 180)
+    if not city or latitude is None or longitude is None:
+        raise ValueError("请先选择一座城市")
+    url = "https://api.open-meteo.com/v1/forecast?" + urlencode({
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": "temperature_2m,weather_code,wind_speed_10m,is_day",
+        "timezone": "auto",
+    })
+    try:
+        with urlrequest.urlopen(url, timeout=WEATHER_REQUEST_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urlerror.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("暂时看不到天空，稍后会再试") from exc
+    current = data.get("current")
+    if not isinstance(current, dict):
+        raise ValueError("天气服务没有返回当前状态")
+    try:
+        code = current.get("weather_code")
+        if isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 99:
+            raise ValueError
+        is_day_value = current.get("is_day")
+        if is_day_value not in {0, 1, False, True}:
+            raise ValueError
+        return WeatherSnapshot(
+            city=city,
+            weather_code=code,
+            temperature=_number_from_ai(current.get("temperature_2m"), "气温", -100, 100),
+            wind_speed=_number_from_ai(current.get("wind_speed_10m"), "风速", 0, 300),
+            is_day=bool(is_day_value),
+            observed_at=str(current.get("time", "")),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("天气服务返回的数据不完整") from exc
+
+
 @dataclass(frozen=True)
 class WorkSnapshot:
     anchor_day: date
@@ -566,6 +800,11 @@ class SlowEarnApp:
     def __init__(self) -> None:
         self.config = load_config()
         self.ai_config = load_ai_config()
+        self.weather_config = load_weather_config()
+        self.weather = weather_snapshot_from_config(self.weather_config)
+        self.weather_loading = False
+        self.weather_error = ""
+        self.next_weather_retry: datetime | None = None
         self.toast_until: datetime | None = None
         self.root = tk.Tk()
         self.root.title("慢慢赚钱 · 日进斗金")
@@ -627,16 +866,59 @@ class SlowEarnApp:
             y = 155 - 120 * math.sin(angle)
             self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="#E8FBFF", outline="")
 
+    def draw_sky(self, now: datetime) -> None:
+        """Draw restrained sky cues behind the value arc, never a full wallpaper."""
+        if not self.weather_config.get("enabled") or not self.weather:
+            return
+        snapshot = self.weather
+        code = snapshot.weather_code
+        drift = int((now.timestamp() / 7) % 36)
+        cloud_color = "#8FC7D8" if code in {1, 2} and snapshot.is_day else "#173E5B" if snapshot.is_day else "#142E49"
+        light_cloud = "#75AFC4" if code in {1, 2} and snapshot.is_day else "#24556E" if snapshot.is_day else "#1A405A"
+        if code in {1, 2, 3, 45, 48, 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}:
+            for x, y, size, color in ((-48 + drift, 67, 58, cloud_color), (274 + drift // 2, 188, 52, light_cloud)):
+                self.canvas.create_oval(x, y, x + size, y + size * 0.55, fill=color, outline="")
+                self.canvas.create_oval(x + size * 0.28, y - size * 0.15, x + size * 0.75, y + size * 0.42, fill=color, outline="")
+        if code in {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}:
+            for index in range(7):
+                x = 24 + (index * 48 + drift) % 330
+                y = 58 + (index % 3) * 14
+                self.canvas.create_line(x, y, x - 4, y + 10, fill="#5798B4", width=1)
+        if code in {71, 73, 75, 77, 85, 86}:
+            for index in range(8):
+                x = 20 + (index * 43 + drift) % 340
+                y = 62 + (index % 3) * 18
+                self.canvas.create_text(x, y, text="·", fill="#B6E7F5", font=("Segoe UI", 12))
+        if snapshot.wind_speed >= 18:
+            for index in range(3):
+                y = 72 + index * 19
+                x = 264 + (drift + index * 11) % 28
+                self.canvas.create_line(x, y, min(358, x + 18), y, fill="#4C98B4", width=1)
+        if code == 0:
+            color = "#74CDE2" if snapshot.is_day else "#9DB7DB"
+            self.canvas.create_oval(330, 48, 346, 64, fill=color, outline="")
+
     def draw(self) -> None:
         self.canvas.delete("all")
         now = datetime.now()
         snapshot = get_snapshot(now, self.config)
 
         # The base is color-key transparent: only compact working information is drawn.
+        self.draw_sky(now)
         self.canvas.create_oval(17, 12, 34, 29, fill="#D8B75A", outline="")
         self.canvas.create_text(25, 20, text="Au", fill="#19283C", font=("Segoe UI", 7, "bold"))
         self.canvas.create_text(43, 20, anchor="w", text="慢慢赚钱", fill="#D8F6FF", font=("Microsoft YaHei UI", 10, "bold"))
-        self.canvas.create_text(43, 36, anchor="w", text="今天也在悄悄变富", fill="#7FB4CA", font=("Microsoft YaHei UI", 8))
+        if self.weather_config.get("enabled"):
+            if self.weather:
+                wind_copy = " · 有风" if self.weather.wind_speed >= 18 else ""
+                sky_copy = f"{weather_icon(self.weather.weather_code, self.weather.is_day)} {self.weather.city} · {weather_label(self.weather.weather_code)} {self.weather.temperature:.0f}°{wind_copy}"
+            elif self.weather_config.get("city"):
+                sky_copy = f"{self.weather_config['city']} · 正在看天空"
+            else:
+                sky_copy = "选择一座城市，看看此刻的天空"
+        else:
+            sky_copy = "今天也在悄悄变富"
+        self.canvas.create_text(43, 36, anchor="w", text=sky_copy, fill="#7FB4CA", font=("Microsoft YaHei UI", 8))
 
         self.rounded_box(284, 8, 312, 32, 10, fill="#123855", outline="#2B6080")
         self.canvas.create_text(298, 20, text="⚙", fill="#C9F5FF", font=("Segoe UI Symbol", 11))
@@ -691,6 +973,7 @@ class SlowEarnApp:
         return f"{WEEKDAY_NAMES[next_day.weekday()]} 再见"
 
     def tick(self) -> None:
+        self.refresh_weather_if_due()
         self.draw()
         self.root.after(1000, self.tick)
 
@@ -732,7 +1015,7 @@ class SlowEarnApp:
         dialog.transient(self.root)
         dialog.attributes("-topmost", True)
         dialog.grab_set()
-        dialog.geometry("460x496")
+        dialog.geometry("460x540")
 
         title = "先画出你的工作节奏" if welcome else "修改后，金额会立刻重算"
         tk.Label(dialog, text=title, bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w", padx=26, pady=(22, 3))
@@ -744,6 +1027,19 @@ class SlowEarnApp:
             bg="#123C59",
             fg="#CFF6FF",
             activebackground="#1A5477",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=12,
+            pady=6,
+        ).pack(anchor="w", padx=26, pady=(0, 10))
+        tk.Button(
+            dialog,
+            text="天空与天气（可选）",
+            command=self.open_weather_settings,
+            bg="#173550",
+            fg="#BFE6F2",
+            activebackground="#244967",
             activeforeground="#FFFFFF",
             relief="flat",
             font=("Microsoft YaHei UI", 9, "bold"),
@@ -1001,6 +1297,189 @@ class SlowEarnApp:
         buttons.pack(fill="x", padx=26, pady=(18, 20))
         tk.Button(buttons, text="返回修改", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="left")
         tk.Button(buttons, text="确认启用", command=lambda: (on_confirm(proposed), dialog.destroy()), bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+
+    def refresh_weather_if_due(self, force: bool = False) -> None:
+        """Fetch selected-city weather at most once per 15 minutes in the background."""
+        if not self.weather_config.get("enabled") or self.weather_loading:
+            return
+        if self.weather_config.get("latitude") is None or self.weather_config.get("longitude") is None:
+            return
+        now = datetime.now()
+        if not force and self.next_weather_retry and now < self.next_weather_retry:
+            return
+        if not force:
+            refreshed_text = str(self.weather_config.get("last_refreshed", ""))
+            try:
+                refreshed = datetime.fromisoformat(refreshed_text)
+                if now - refreshed < timedelta(minutes=WEATHER_REFRESH_MINUTES):
+                    return
+            except ValueError:
+                pass
+
+        self.weather_loading = True
+        config = copy.deepcopy(self.weather_config)
+
+        def worker() -> None:
+            try:
+                snapshot = request_current_weather(config)
+                self.root.after(0, lambda: self.apply_weather_snapshot(snapshot))
+            except ValueError as exc:
+                message = str(exc)
+                self.root.after(0, lambda: self.handle_weather_error(message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_weather_snapshot(self, snapshot: WeatherSnapshot) -> None:
+        self.weather_loading = False
+        self.weather_error = ""
+        self.next_weather_retry = datetime.now() + timedelta(minutes=WEATHER_REFRESH_MINUTES)
+        self.weather = snapshot
+        self.weather_config["last_weather"] = {
+            "weather_code": snapshot.weather_code,
+            "temperature": snapshot.temperature,
+            "wind_speed": snapshot.wind_speed,
+            "is_day": snapshot.is_day,
+            "observed_at": snapshot.observed_at,
+        }
+        self.weather_config["last_refreshed"] = datetime.now().isoformat(timespec="seconds")
+        save_weather_config(self.weather_config)
+        self.draw()
+
+    def handle_weather_error(self, message: str) -> None:
+        self.weather_loading = False
+        self.weather_error = message
+        self.next_weather_retry = datetime.now() + timedelta(minutes=WEATHER_REFRESH_MINUTES)
+        self.draw()
+
+    def open_weather_settings(self) -> None:
+        """Let people choose a city deliberately before any weather request happens."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("天空与天气")
+        dialog.configure(bg="#0B2034")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.geometry("500x475")
+
+        tk.Label(dialog, text="天空与天气", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
+        tk.Label(dialog, text="由你手动选择一座城市。开启后，每 15 分钟请求一次该城市的天气；不会获取设备定位。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=444, justify="left").pack(anchor="w", padx=26)
+        tk.Label(dialog, text="天气数据：Open-Meteo。仅城市名与选中坐标会发送给天气服务。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8), wraplength=444, justify="left").pack(anchor="w", padx=26, pady=(8, 14))
+
+        search_row = tk.Frame(dialog, bg="#0B2034")
+        search_row.pack(fill="x", padx=26)
+        city_entry = tk.Entry(search_row, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10))
+        city_entry.insert(0, str(self.weather_config.get("city", "")))
+        city_entry.pack(side="left", fill="x", expand=True, ipady=7)
+        results = tk.Listbox(dialog, height=5, bg="#102B43", fg="#DDF6FF", selectbackground="#245A78", selectforeground="#FFFFFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", font=("Microsoft YaHei UI", 9), activestyle="none")
+        results.pack(fill="x", padx=26, pady=(10, 0))
+        selected: dict[str, dict[str, Any] | None] = {"city": None}
+        current = self.weather_config
+        if current.get("city") and current.get("latitude") is not None and current.get("longitude") is not None:
+            selected["city"] = {
+                "city": str(current["city"]),
+                "admin": "",
+                "country": "",
+                "latitude": float(current["latitude"]),
+                "longitude": float(current["longitude"]),
+                "timezone": str(current.get("timezone", "")),
+            }
+
+        status_text = "当前未开启天气同步。" if not current.get("enabled") else f"当前显示：{current.get('city', '未选择城市')}。"
+        status = tk.Label(dialog, text=status_text, bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 8), height=2, anchor="w", justify="left", wraplength=444)
+        status.pack(fill="x", padx=26, pady=(8, 0))
+        buttons = tk.Frame(dialog, bg="#0B2034")
+        buttons.pack(fill="x", padx=26, pady=(8, 20))
+        candidates: list[dict[str, Any]] = []
+
+        def set_selection(_event: tk.Event[tk.Misc] | None = None) -> None:
+            indexes = results.curselection()
+            if indexes:
+                selected["city"] = candidates[indexes[0]]
+
+        def finish_city_search(found: list[dict[str, Any]] | None, message: str = "") -> None:
+            if not dialog.winfo_exists():
+                return
+            search_button.configure(state="normal")
+            results.delete(0, "end")
+            candidates.clear()
+            if found is None:
+                status.configure(text=message, fg="#FFB39D")
+                return
+            candidates.extend(found)
+            if not candidates:
+                status.configure(text="没有找到匹配城市，请补充省份或国家。", fg="#FFB39D")
+                return
+            for candidate in candidates:
+                suffix = " · ".join(part for part in (candidate["admin"], candidate["country"]) if part)
+                results.insert("end", f"{candidate['city']}" + (f" · {suffix}" if suffix else ""))
+            results.selection_set(0)
+            selected["city"] = candidates[0]
+            status.configure(text="选择结果后保存。城市名只在本机保存；所选坐标会用于请求天气。", fg="#93D9CF")
+
+        def search() -> None:
+            query = city_entry.get()
+            try:
+                if not query.strip():
+                    raise ValueError("先输入城市名")
+            except ValueError as exc:
+                status.configure(text=str(exc), fg="#FFB39D")
+                return
+            search_button.configure(state="disabled")
+            status.configure(text="正在查询城市…", fg="#8DEAFF")
+
+            def worker() -> None:
+                try:
+                    found = search_cities(query)
+                    self.root.after(0, lambda: finish_city_search(found))
+                except ValueError as exc:
+                    message = str(exc)
+                    self.root.after(0, lambda: finish_city_search(None, message))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def save_city() -> None:
+            candidate = selected["city"]
+            if not candidate:
+                status.configure(text="先查询并选择一座城市", fg="#FFB39D")
+                return
+            self.weather_config = {
+                **DEFAULT_WEATHER_CONFIG,
+                "enabled": True,
+                "city": candidate["city"],
+                "latitude": candidate["latitude"],
+                "longitude": candidate["longitude"],
+                "timezone": candidate["timezone"],
+            }
+            self.weather = None
+            self.weather_error = ""
+            self.next_weather_retry = None
+            save_weather_config(self.weather_config)
+            dialog.destroy()
+            self.refresh_weather_if_due(force=True)
+            self.draw()
+
+        def clear_weather() -> None:
+            if not messagebox.askyesno(
+                "关闭天空与天气",
+                "这会停止天气同步，并清除本机保存的城市、坐标和天气缓存。\n\n工资、工作节奏与 AI 设置不会受到影响。",
+                parent=dialog,
+            ):
+                return
+            self.weather_config = copy.deepcopy(DEFAULT_WEATHER_CONFIG)
+            self.weather = None
+            self.weather_error = ""
+            self.next_weather_retry = None
+            save_weather_config(self.weather_config)
+            self.draw()
+            dialog.destroy()
+
+        search_button = tk.Button(search_row, text="查询城市", command=search, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=13, pady=7)
+        search_button.pack(side="right", padx=(8, 0))
+        results.bind("<<ListboxSelect>>", set_selection)
+        tk.Button(buttons, text="关闭并清除", command=clear_weather, bg="#482B39", fg="#FFD2D6", activebackground="#6A3D4C", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=12, pady=8).pack(side="left")
+        tk.Button(buttons, text="保存并显示", command=save_city, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
+        city_entry.focus_set()
 
     def close(self) -> None:
         self.config["window_position"] = [self.root.winfo_x(), self.root.winfo_y()]

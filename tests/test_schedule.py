@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from manmanzhuanqian import (
     DEFAULT_CONFIG,
+    DEFAULT_WEATHER_CONFIG,
     ai_request_guard,
     config_from_ai_response,
     config_from_form,
@@ -18,8 +19,13 @@ from manmanzhuanqian import (
     normalise_ai_usage_period,
     normalise_sessions,
     parse_clock,
+    request_current_weather,
     request_schedule_suggestion,
     save_byok_connection,
+    search_cities,
+    weather_icon,
+    weather_label,
+    weather_snapshot_from_config,
 )
 
 
@@ -162,6 +168,61 @@ class ScheduleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_byok_connection("https://api.example.com/v1", "my-model", "new-key", "not-a-number")
         save_key.assert_not_called()
+
+    def test_weather_labels_keep_the_sky_human_and_compact(self) -> None:
+        self.assertEqual(weather_label(0), "晴朗")
+        self.assertEqual(weather_label(63), "下雨")
+        self.assertEqual(weather_label(95), "雷雨")
+        self.assertEqual(weather_icon(0, True), "☀")
+        self.assertEqual(weather_icon(0, False), "☾")
+
+    def test_city_search_and_weather_request_use_only_selected_city_data(self) -> None:
+        class Response:
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            def read(self) -> bytes:
+                return self.body
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        city_response = b'{"results":[{"name":"Shanghai","admin1":"Shanghai","country":"China","latitude":31.23,"longitude":121.47,"timezone":"Asia/Shanghai"}]}'
+        weather_response = b'{"current":{"temperature_2m":24.4,"weather_code":61,"wind_speed_10m":12.0,"is_day":1,"time":"2026-08-29T14:30"}}'
+        with patch("manmanzhuanqian.urlrequest.urlopen", side_effect=[Response(city_response), Response(weather_response)]) as mocked_open:
+            cities = search_cities("上海")
+            weather = request_current_weather({"city": cities[0]["city"], "latitude": cities[0]["latitude"], "longitude": cities[0]["longitude"]})
+        self.assertEqual(cities[0]["city"], "Shanghai")
+        self.assertEqual(weather.city, "Shanghai")
+        self.assertEqual(weather.weather_code, 61)
+        self.assertEqual(weather.temperature, 24.4)
+        search_url = mocked_open.call_args_list[0].args[0]
+        forecast_url = mocked_open.call_args_list[1].args[0]
+        self.assertIn("name=%E4%B8%8A%E6%B5%B7", search_url)
+        self.assertIn("latitude=31.23", forecast_url)
+        self.assertNotIn("monthly_salary", forecast_url)
+
+    def test_weather_snapshot_uses_local_cache_without_a_network_request(self) -> None:
+        config = {
+            **DEFAULT_WEATHER_CONFIG,
+            "enabled": True,
+            "city": "上海",
+            "latitude": 31.23,
+            "longitude": 121.47,
+            "last_weather": {
+                "weather_code": 2,
+                "temperature": 26.0,
+                "wind_speed": 8.0,
+                "is_day": True,
+                "observed_at": "2026-08-29T14:30",
+            },
+        }
+        snapshot = weather_snapshot_from_config(config)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.city if snapshot else "", "上海")
 
 
 if __name__ == "__main__":
