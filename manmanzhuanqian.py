@@ -28,7 +28,7 @@ HISTORICAL_GOLD_PRICE_PER_GRAM = 280.0
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "monthly_salary": 15000.0,
-    "paid_days": 21.75,
+    "paid_days": 22.0,
     "currency": "¥",
     "sessions": [
         {"start": "09:30", "end": "12:00"},

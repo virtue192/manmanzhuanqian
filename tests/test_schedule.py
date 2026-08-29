@@ -9,7 +9,7 @@ class ScheduleTests(unittest.TestCase):
         self.config = {
             **DEFAULT_CONFIG,
             "monthly_salary": 21750,
-            "paid_days": 21.75,
+            "paid_days": 22,
             "sessions": [
                 {"start": "09:00", "end": "12:00"},
                 {"start": "13:00", "end": "18:00"},
@@ -26,13 +26,13 @@ class ScheduleTests(unittest.TestCase):
         snapshot = get_snapshot(datetime(2026, 8, 24, 12, 30), self.config)
         self.assertEqual(snapshot.phase, "pause")
         self.assertEqual(snapshot.progress, 3 / 8)
-        self.assertEqual(snapshot.earned, 375)
+        self.assertAlmostEqual(snapshot.earned, 21750 / 22 * 3 / 8)
 
     def test_after_work_reaches_daily_value(self) -> None:
         snapshot = get_snapshot(datetime(2026, 8, 24, 18, 1), self.config)
         self.assertEqual(snapshot.phase, "complete")
         self.assertEqual(snapshot.progress, 1)
-        self.assertEqual(snapshot.earned, 1000)
+        self.assertAlmostEqual(snapshot.earned, 21750 / 22)
 
     def test_rest_day_does_not_accumulate(self) -> None:
         snapshot = get_snapshot(datetime(2026, 8, 29, 14, 0), self.config)  # Saturday
@@ -63,7 +63,7 @@ class ScheduleTests(unittest.TestCase):
 
     def test_saved_form_values_immediately_change_the_calculation(self) -> None:
         before = get_snapshot(datetime(2026, 8, 24, 10, 0), self.config)
-        updated = config_from_form(self.config, "43500", "21.75", "09:00 - 12:00", "13:00 - 18:00", "1、2、3、4、5")
+        updated = config_from_form(self.config, "43500", "22", "09:00 - 12:00", "13:00 - 18:00", "1、2、3、4、5")
         after = get_snapshot(datetime(2026, 8, 24, 10, 0), updated)
         self.assertEqual(updated["monthly_salary"], 43500)
         self.assertGreater(after.earned, before.earned)
