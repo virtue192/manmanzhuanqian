@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +11,9 @@ from manmanzhuanqian import (
     ai_request_guard,
     config_from_ai_response,
     config_from_form,
+    complete_focus_session,
+    focus_remaining_seconds,
+    focus_value,
     format_gold_weight,
     format_percent,
     forget_byok_connection,
@@ -23,6 +26,7 @@ from manmanzhuanqian import (
     request_schedule_suggestion,
     save_byok_connection,
     search_cities,
+    start_focus_session,
     weather_icon,
     weather_label,
     weather_snapshot_from_config,
@@ -223,6 +227,25 @@ class ScheduleTests(unittest.TestCase):
         snapshot = weather_snapshot_from_config(config)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot.city if snapshot else "", "上海")
+
+    def test_focus_session_is_a_reflection_not_a_score(self) -> None:
+        started = datetime(2026, 8, 24, 9, 0)
+        state = start_focus_session({"active": None, "sessions": []}, "整理竞品卡", started)
+        self.assertAlmostEqual(focus_remaining_seconds(state, started + timedelta(minutes=10)) or 0, 15 * 60)
+        with self.assertRaises(ValueError):
+            start_focus_session(state, "不应覆盖上一段", started)
+        finished, record = complete_focus_session(state, "advance", started + timedelta(minutes=25))
+        self.assertIsNone(finished["active"])
+        self.assertEqual(record["reflection"], "advance")
+        self.assertEqual(record["note"], "整理竞品卡")
+        self.assertEqual(record["elapsed_seconds"], 25 * 60)
+        self.assertAlmostEqual(focus_value(self.config, record["elapsed_seconds"]), 21750 / 22 / 8 * 25 / 60)
+
+    def test_focus_rest_is_a_valid_reflection(self) -> None:
+        started = datetime(2026, 8, 24, 13, 0)
+        state = start_focus_session({"active": None, "sessions": []}, now=started)
+        _finished, record = complete_focus_session(state, "restore", started + timedelta(minutes=25))
+        self.assertEqual(record["reflection"], "restore")
 
 
 if __name__ == "__main__":

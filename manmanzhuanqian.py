@@ -35,6 +35,8 @@ AI_REQUEST_TIMEOUT_SECONDS = 25
 MAX_AI_DESCRIPTION_LENGTH = 1500
 WEATHER_REFRESH_MINUTES = 15
 WEATHER_REQUEST_TIMEOUT_SECONDS = 10
+FOCUS_DURATION_MINUTES = 25
+MAX_FOCUS_HISTORY = 120
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "monthly_salary": 15000.0,
@@ -75,6 +77,17 @@ DEFAULT_WEATHER_CONFIG: dict[str, Any] = {
     "last_refreshed": "",
 }
 
+DEFAULT_FOCUS_STATE: dict[str, Any] = {
+    "active": None,
+    "sessions": [],
+}
+
+FOCUS_REFLECTIONS = {
+    "advance": "推进了一件事",
+    "sustain": "维持住了节奏",
+    "restore": "好好休息了",
+}
+
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
@@ -100,6 +113,11 @@ def ai_key_path() -> Path:
 def weather_config_path() -> Path:
     """Return the optional, local-only weather preference and cache path."""
     return local_data_path().with_name("sky.json")
+
+
+def focus_state_path() -> Path:
+    """Return the local-only focus reflection state path."""
+    return local_data_path().with_name("focus.json")
 
 
 def parse_clock(value: str) -> int:
@@ -705,6 +723,125 @@ def request_current_weather(config: dict[str, Any]) -> WeatherSnapshot:
         raise ValueError("天气服务返回的数据不完整") from exc
 
 
+def _safe_focus_active(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError
+    started_at = str(raw.get("started_at", ""))
+    ends_at = str(raw.get("ends_at", ""))
+    started = datetime.fromisoformat(started_at)
+    ends = datetime.fromisoformat(ends_at)
+    if not started < ends or ends - started > timedelta(hours=2):
+        raise ValueError
+    note = str(raw.get("note", "")).strip()
+    if len(note) > 240:
+        raise ValueError
+    return {"started_at": started_at, "ends_at": ends_at, "note": note}
+
+
+def _safe_focus_session(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError
+    active = _safe_focus_active(raw)
+    reflection = raw.get("reflection")
+    if reflection not in FOCUS_REFLECTIONS:
+        raise ValueError
+    completed_at = str(raw.get("completed_at", ""))
+    datetime.fromisoformat(completed_at)
+    elapsed_seconds = raw.get("elapsed_seconds")
+    if isinstance(elapsed_seconds, bool) or not isinstance(elapsed_seconds, int) or not 1 <= elapsed_seconds <= FOCUS_DURATION_MINUTES * 60:
+        raise ValueError
+    return {**active, "reflection": reflection, "completed_at": completed_at, "elapsed_seconds": elapsed_seconds}
+
+
+def _safe_focus_state(raw: Any) -> dict[str, Any]:
+    state = copy.deepcopy(DEFAULT_FOCUS_STATE)
+    if not isinstance(raw, dict):
+        return state
+    try:
+        active = raw.get("active")
+        state["active"] = _safe_focus_active(active) if active is not None else None
+        sessions = raw.get("sessions", [])
+        if not isinstance(sessions, list):
+            raise ValueError
+        state["sessions"] = [_safe_focus_session(item) for item in sessions[-MAX_FOCUS_HISTORY:]]
+    except (TypeError, ValueError):
+        return copy.deepcopy(DEFAULT_FOCUS_STATE)
+    return state
+
+
+def load_focus_state(path: Path | None = None) -> dict[str, Any]:
+    path = path or focus_state_path()
+    try:
+        return _safe_focus_state(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return copy.deepcopy(DEFAULT_FOCUS_STATE)
+
+
+def save_focus_state(state: dict[str, Any], path: Path | None = None) -> None:
+    path = path or focus_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(_safe_focus_state(state), ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def start_focus_session(state: dict[str, Any], note: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """Start one intentional 25-minute block. An existing block is never overwritten."""
+    clean = _safe_focus_state(state)
+    if clean["active"] is not None:
+        raise ValueError("一段专注还在进行中")
+    note = note.strip()
+    if len(note) > 240:
+        raise ValueError("这段专注的备注请控制在 240 字以内")
+    started = now or datetime.now()
+    ends = started + timedelta(minutes=FOCUS_DURATION_MINUTES)
+    clean["active"] = {"started_at": started.isoformat(timespec="seconds"), "ends_at": ends.isoformat(timespec="seconds"), "note": note}
+    return clean
+
+
+def focus_remaining_seconds(state: dict[str, Any], now: datetime | None = None) -> float | None:
+    active = _safe_focus_state(state).get("active")
+    if active is None:
+        return None
+    return max(0.0, (datetime.fromisoformat(active["ends_at"]) - (now or datetime.now())).total_seconds())
+
+
+def scheduled_work_seconds(config: dict[str, Any]) -> float:
+    return sum((_session_bounds(date.today(), session)[1] - _session_bounds(date.today(), session)[0]).total_seconds() for session in config["sessions"])
+
+
+def focus_value(config: dict[str, Any], seconds: float) -> float:
+    """Estimate paid time value only; it is not a performance score."""
+    scheduled_seconds = scheduled_work_seconds(config)
+    if scheduled_seconds <= 0:
+        return 0.0
+    daily_value = float(config["monthly_salary"]) / float(config["paid_days"])
+    return daily_value * max(0.0, seconds) / scheduled_seconds
+
+
+def complete_focus_session(state: dict[str, Any], reflection: str, now: datetime | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record a chosen reflection, leaving the value interpretation to the person."""
+    clean = _safe_focus_state(state)
+    active = clean.get("active")
+    if active is None:
+        raise ValueError("没有待回望的专注时段")
+    if reflection not in FOCUS_REFLECTIONS:
+        raise ValueError("请选择这段时间留下些什么")
+    current = now or datetime.now()
+    started = datetime.fromisoformat(active["started_at"])
+    ends = datetime.fromisoformat(active["ends_at"])
+    elapsed = max(1, min(round((current - started).total_seconds()), round((ends - started).total_seconds())))
+    record = {
+        **active,
+        "reflection": reflection,
+        "completed_at": current.isoformat(timespec="seconds"),
+        "elapsed_seconds": elapsed,
+    }
+    clean["active"] = None
+    clean["sessions"] = [*clean["sessions"], record][-MAX_FOCUS_HISTORY:]
+    return clean, record
+
+
 @dataclass(frozen=True)
 class WorkSnapshot:
     anchor_day: date
@@ -788,6 +925,12 @@ def format_duration(seconds: float) -> str:
     return f"{hours}小时{minutes:02d}分"
 
 
+def format_countdown(seconds: float) -> str:
+    remaining = max(0, round(seconds))
+    minutes, seconds = divmod(remaining, 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
 def blend(first: str, second: str, amount: float) -> str:
     amount = max(0.0, min(1.0, amount))
     first_rgb = tuple(int(first[i : i + 2], 16) for i in (1, 3, 5))
@@ -805,7 +948,11 @@ class SlowEarnApp:
         self.weather_loading = False
         self.weather_error = ""
         self.next_weather_retry: datetime | None = None
+        self.focus_state = load_focus_state()
+        self.focus_completion_open = False
+        self.focus_reminder_at: datetime | None = None
         self.toast_until: datetime | None = None
+        self.toast_message = ""
         self.root = tk.Tk()
         self.root.title("慢慢赚钱 · 日进斗金")
         self.root.overrideredirect(True)
@@ -935,13 +1082,19 @@ class SlowEarnApp:
         self.canvas.create_text(190, 186, text=format_percent(snapshot.progress), fill="#8DEAFF", font=("Segoe UI", 16, "bold"))
         self.canvas.create_text(190, 208, text=f"{phase_label} · {self.detail_copy(snapshot, now)}", fill="#C4EAF6", font=("Microsoft YaHei UI", 9, "bold"))
 
+        focus_remaining = focus_remaining_seconds(self.focus_state, now)
         if self.toast_until and now < self.toast_until:
-            footer, footer_color = "✓ 已按新参数重新计算", "#A4F5DD"
+            footer, footer_color = self.toast_message or "✓ 已按新参数重新计算", "#A4F5DD"
+        elif focus_remaining is not None and focus_remaining > 0:
+            footer, footer_color = f"专注进行中 · 还剩 {format_countdown(focus_remaining)}", "#A4F5DD"
+        elif focus_remaining == 0:
+            footer, footer_color = "这一段结束了，给自己一句回望", "#E4C675"
         else:
             footer, footer_color = "拖动空白处移动 · Ctrl+, 设置", "#7CAEC2"
         self.canvas.create_text(190, 230, text=footer, fill=footer_color, font=("Microsoft YaHei UI", 8))
         self.rounded_box(20, 244, 198, 272, 13, fill="#10405F", outline="#3A94B8")
-        self.canvas.create_text(109, 258, text="用一句话调整", fill="#D5F8FF", font=("Microsoft YaHei UI", 9, "bold"))
+        focus_button = f"专注 {format_countdown(focus_remaining)}" if focus_remaining is not None and focus_remaining > 0 else "回望这 25 分钟" if focus_remaining == 0 else "开始专注 25 分钟"
+        self.canvas.create_text(109, 258, text=focus_button, fill="#D5F8FF", font=("Microsoft YaHei UI", 9, "bold"))
         self.rounded_box(207, 244, 360, 272, 13, fill="#173550", outline="#38627D")
         self.canvas.create_text(284, 258, text="手动修改参数", fill="#C7E6F0", font=("Microsoft YaHei UI", 9, "bold"))
 
@@ -974,6 +1127,7 @@ class SlowEarnApp:
 
     def tick(self) -> None:
         self.refresh_weather_if_due()
+        self.check_focus_completion()
         self.draw()
         self.root.after(1000, self.tick)
 
@@ -989,7 +1143,10 @@ class SlowEarnApp:
         elif 352 <= x <= 379 and 8 <= y <= 32:
             self.close()
         elif 20 <= x <= 198 and 244 <= y <= 272:
-            self.open_ai_capture()
+            if focus_remaining_seconds(self.focus_state) is None:
+                self.open_focus_start()
+            else:
+                self.open_focus_reflection(allow_early=True)
         elif 207 <= x <= 360 and 244 <= y <= 272:
             self.open_settings()
         else:
@@ -1085,6 +1242,7 @@ class SlowEarnApp:
                 self.config = updated
                 save_config(self.config)
                 self.toast_until = datetime.now() + timedelta(seconds=5)
+                self.toast_message = "✓ 已按新参数重新计算"
                 self.draw()
                 dialog.destroy()
             except ValueError as exc:
@@ -1161,6 +1319,7 @@ class SlowEarnApp:
                     entries["request_limit"].get(),
                 )
                 self.toast_until = datetime.now() + timedelta(seconds=5)
+                self.toast_message = "✓ 已保存你的 AI 连接"
                 self.draw()
                 dialog.destroy()
             except (OSError, ValueError) as exc:
@@ -1177,6 +1336,7 @@ class SlowEarnApp:
                 forget_byok_connection()
                 self.ai_config = copy.deepcopy(DEFAULT_AI_CONFIG)
                 self.toast_until = datetime.now() + timedelta(seconds=5)
+                self.toast_message = "✓ 已断开并删除 AI 连接"
                 self.draw()
                 dialog.destroy()
             except OSError as exc:
@@ -1220,6 +1380,7 @@ class SlowEarnApp:
             self.config = proposed
             save_config(self.config)
             self.toast_until = datetime.now() + timedelta(seconds=5)
+            self.toast_message = "✓ 已按新参数重新计算"
             self.draw()
             if source_dialog and source_dialog.winfo_exists():
                 source_dialog.destroy()
@@ -1480,6 +1641,112 @@ class SlowEarnApp:
         tk.Button(buttons, text="关闭并清除", command=clear_weather, bg="#482B39", fg="#FFD2D6", activebackground="#6A3D4C", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=12, pady=8).pack(side="left")
         tk.Button(buttons, text="保存并显示", command=save_city, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=18, pady=8).pack(side="right")
         city_entry.focus_set()
+
+    def check_focus_completion(self) -> None:
+        remaining = focus_remaining_seconds(self.focus_state)
+        if remaining is None or remaining > 0 or self.focus_completion_open:
+            return
+        if self.focus_reminder_at and datetime.now() < self.focus_reminder_at:
+            return
+        self.open_focus_reflection()
+
+    def open_focus_start(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("开始专注")
+        dialog.configure(bg="#0B2034")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.geometry("430x270")
+
+        tk.Label(dialog, text="把这 25 分钟留给什么？", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(24, 4))
+        tk.Label(dialog, text="可以留空。结束时不打分，只问这段时间留下些什么。", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=26, pady=(0, 16))
+        note = tk.Entry(dialog, bg="#15334E", fg="#F4FDFF", insertbackground="#F4FDFF", relief="flat", highlightthickness=1, highlightbackground="#2B5A77", highlightcolor="#79DDF5", font=("Microsoft YaHei UI", 10))
+        note.pack(fill="x", padx=26, ipady=8)
+        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        status.pack(anchor="w", padx=26, pady=(8, 0))
+        buttons = tk.Frame(dialog, bg="#0B2034")
+        buttons.pack(fill="x", padx=26, pady=(12, 20))
+
+        def begin() -> None:
+            try:
+                self.focus_state = start_focus_session(self.focus_state, note.get())
+                save_focus_state(self.focus_state)
+                self.focus_completion_open = False
+                self.focus_reminder_at = None
+                self.toast_until = datetime.now() + timedelta(seconds=4)
+                self.toast_message = "25 分钟，慢慢来"
+                self.draw()
+                dialog.destroy()
+            except ValueError as exc:
+                status.configure(text=str(exc))
+
+        tk.Button(buttons, text="稍后再说", command=dialog.destroy, bg="#173550", fg="#BFE6F2", activebackground="#244967", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=16, pady=8).pack(side="left")
+        tk.Button(buttons, text="开始 25 分钟", command=begin, bg="#4FC5E6", fg="#082033", activebackground="#8CEBFF", activeforeground="#061725", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), padx=16, pady=8).pack(side="right")
+        note.focus_set()
+
+    def open_focus_reflection(self, allow_early: bool = False) -> None:
+        active = self.focus_state.get("active")
+        if not active or self.focus_completion_open:
+            return
+        remaining = focus_remaining_seconds(self.focus_state)
+        if remaining is not None and remaining > 0 and not allow_early:
+            return
+        self.focus_completion_open = True
+        dialog = tk.Toplevel(self.root)
+        dialog.title("这一段留下些什么")
+        dialog.configure(bg="#0B2034")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.attributes("-topmost", True)
+        dialog.grab_set()
+        dialog.geometry("430x342")
+
+        elapsed_seconds = FOCUS_DURATION_MINUTES * 60 if remaining is None else max(1, FOCUS_DURATION_MINUTES * 60 - round(remaining))
+        minutes = max(1, round(elapsed_seconds / 60))
+        tk.Label(dialog, text=f"这 {minutes} 分钟，留下些什么？", bg="#0B2034", fg="#EAFBFF", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=26, pady=(22, 4))
+        note = active.get("note", "")
+        if note:
+            tk.Label(dialog, text=f"你刚才想做：{note}", bg="#0B2034", fg="#8DB4C6", font=("Microsoft YaHei UI", 9), wraplength=378, justify="left").pack(anchor="w", padx=26, pady=(0, 7))
+        tk.Label(dialog, text="不评分，也不判断好坏。选一个最贴近此刻的答案。", bg="#0B2034", fg="#93D9CF", font=("Microsoft YaHei UI", 8)).pack(anchor="w", padx=26, pady=(0, 14))
+        options = tk.Frame(dialog, bg="#0B2034")
+        options.pack(fill="x", padx=26)
+        status = tk.Label(dialog, text="", bg="#0B2034", fg="#FFB39D", font=("Microsoft YaHei UI", 9), height=1)
+        status.pack(anchor="w", padx=26, pady=(8, 0))
+
+        def postpone() -> None:
+            self.focus_completion_open = False
+            self.focus_reminder_at = datetime.now() + timedelta(minutes=5)
+            dialog.destroy()
+
+        def reflect(reflection: str) -> None:
+            try:
+                self.focus_state, record = complete_focus_session(self.focus_state, reflection)
+                save_focus_state(self.focus_state)
+                self.focus_completion_open = False
+                self.focus_reminder_at = None
+                if reflection == "restore":
+                    self.toast_until = datetime.now() + timedelta(seconds=6)
+                    self.toast_message = "这 25 分钟，已经好好安放"
+                    self.draw()
+                else:
+                    value = focus_value(self.config, float(record["elapsed_seconds"]))
+                    self.toast_until = datetime.now() + timedelta(seconds=6)
+                    self.toast_message = f"{FOCUS_REFLECTIONS[reflection]} · 约 {format_money(value, self.config['currency'])}"
+                    self.draw()
+                dialog.destroy()
+            except ValueError as exc:
+                status.configure(text=str(exc))
+
+        for key, text, color in (
+            ("advance", "推进了一件事", "#173D59"),
+            ("sustain", "维持住了节奏", "#173550"),
+            ("restore", "好好休息了", "#27454D"),
+        ):
+            tk.Button(options, text=text, command=lambda choice=key: reflect(choice), bg=color, fg="#D5F8FF", activebackground="#2B6078", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 9, "bold"), pady=8).pack(fill="x", pady=3)
+        tk.Button(dialog, text="五分钟后再问", command=postpone, bg="#0B2034", fg="#7CAEC2", activebackground="#173550", activeforeground="#FFFFFF", relief="flat", font=("Microsoft YaHei UI", 8), pady=4).pack(pady=(7, 12))
+        dialog.protocol("WM_DELETE_WINDOW", postpone)
 
     def close(self) -> None:
         self.config["window_position"] = [self.root.winfo_x(), self.root.winfo_y()]
