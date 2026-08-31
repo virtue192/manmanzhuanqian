@@ -6,9 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from manmanzhuanqian import (
+    DEFAULT_APPEARANCE_CONFIG,
     DEFAULT_CONFIG,
     DEFAULT_WEATHER_CONFIG,
     ai_request_guard,
+    appearance_from_ai_response,
     config_from_ai_response,
     config_from_form,
     complete_focus_session,
@@ -23,6 +25,7 @@ from manmanzhuanqian import (
     normalise_sessions,
     parse_clock,
     request_current_weather,
+    request_appearance_suggestion,
     request_schedule_suggestion,
     save_byok_connection,
     search_cities,
@@ -97,6 +100,20 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(updated["monthly_salary"], 43500)
         self.assertGreater(after.earned, before.earned)
 
+    def test_form_can_keep_four_work_blocks_for_the_timeband(self) -> None:
+        updated = config_from_form(
+            self.config,
+            "43500",
+            "22",
+            "09:00 - 10:00",
+            "10:30 - 12:00",
+            "1、2、3、4、5",
+            "13:30 - 15:00",
+            "15:30 - 18:00",
+        )
+        self.assertEqual(len(updated["sessions"]), 4)
+        self.assertEqual(updated["sessions"][-1]["end"], "18:00")
+
     def test_ai_response_becomes_an_uncommitted_validated_schedule(self) -> None:
         proposal = config_from_ai_response(
             self.config,
@@ -152,6 +169,39 @@ class ScheduleTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(next_month["request_count"], 0)
         self.assertEqual(next_month["usage_month"], "2026-09")
+
+    def test_appearance_ai_is_limited_to_the_three_reviewed_skin_values(self) -> None:
+        proposal = appearance_from_ai_response(
+            '{"skin_id":"mist_gold","opacity":72,"motion_intensity":30,"weather_intensity":55}'
+        )
+        self.assertEqual(proposal["skin_id"], "mist_gold")
+        self.assertEqual(proposal["opacity"], 72)
+        with self.assertRaises(ValueError):
+            appearance_from_ai_response(
+                '{"skin_id":"arbitrary-css","opacity":72,"motion_intensity":30,"weather_intensity":55}'
+            )
+        self.assertIn(DEFAULT_APPEARANCE_CONFIG["skin_id"], {"clear_sky", "mist_gold", "rain_walk"})
+
+    def test_appearance_byok_only_contains_the_explicit_feeling(self) -> None:
+        class Response:
+            def read(self) -> bytes:
+                return b'{"choices":[{"message":{"content":"{\\"skin_id\\":\\"mist_gold\\",\\"opacity\\":72,\\"motion_intensity\\":30,\\"weather_intensity\\":55}"}}],"usage":{"prompt_tokens":12,"completion_tokens":5}}'
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        feeling = "我最近总在晚上加班，想要安静一点，不要太亮。"
+        with patch("manmanzhuanqian.urlrequest.urlopen", return_value=Response()) as mocked_open:
+            _content, usage = request_appearance_suggestion(feeling, {"base_url": "https://api.example.com/v1", "model": "my-model"}, "test-key")
+        request = mocked_open.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["messages"][1]["content"], feeling)
+        self.assertNotIn("monthly_salary", payload["messages"][1]["content"])
+        self.assertNotIn("workdays", payload["messages"][1]["content"])
+        self.assertEqual(usage["completion_tokens"], 5)
 
     def test_forgetting_byok_connection_removes_only_its_two_local_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
